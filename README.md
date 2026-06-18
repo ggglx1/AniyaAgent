@@ -2,7 +2,7 @@
 
 HappyClaude is a local Agent CLI project inspired by Claude Code. It is built with Python 3.11 and focuses on the core engineering mechanisms behind an AI coding agent: ReAct loops, tool calling, local tool execution, permission checks, context management, task systems, multi-agent collaboration, scheduled jobs, and Git Worktree isolation.
 
-This project is mainly for learning and experimenting with how an agent runtime works. It is not a full replacement for Claude Code.
+HappyClaude provides a practical agent runtime for local execution, task orchestration, and multi-agent collaboration.
 
 ## Features
 
@@ -255,9 +255,9 @@ Spawn alice as a backend teammate and ask her to inspect TaskSystem.py.
 Create a worktree for a refactor task and bind the task to that worktree.
 ```
 
-## Learning Roadmap
+## Implementation Roadmap
 
-This project follows the learning path from a Claude Code-style agent tutorial:
+The project is organized around the following implementation stages:
 
 ```text
 S01 Agent Loop
@@ -286,7 +286,7 @@ HappyClaude currently implements most of the core runtime mechanisms through S18
 
 ## Notes
 
-- This is a learning project. Security and process isolation are simplified.
+- Security and process isolation are intentionally simplified.
 - Background task cancellation is cooperative. Python threads cannot be force-killed safely, so cancellation is recorded and applied when the underlying tool returns.
 - Durable cron jobs are persisted, but the scheduler only runs while the Agent process is running.
 - Before pushing to a public repository, run a secret scan and make sure `.env` and any real API keys are not committed.
