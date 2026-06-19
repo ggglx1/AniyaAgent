@@ -1,0 +1,24 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "happyclaude-client",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-18",
+  "assets": {
+    "directory": "../dist/public",
+    "binding": "ASSETS"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "HAPPYCLAUDE_SESSION",
+        "class_name": "HappyClaudeSession"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["HappyClaudeSession"]
+    }
+  ]
+}

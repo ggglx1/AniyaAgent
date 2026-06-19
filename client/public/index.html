@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>HappyClaude</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <h1>HappyClaude</h1>
+        <p id="status">连接中...</p>
+      </div>
+      <span id="dot" class="dot"></span>
+    </header>
+
+    <section id="messages" class="messages"></section>
+
+    <form id="composer" class="composer">
+      <textarea id="input" rows="1" placeholder="输入任务，发送到本机 Agent"></textarea>
+      <button id="send" type="submit">发送</button>
+    </form>
+  </main>
+
+  <div id="permission" class="permission hidden">
+    <div class="permission-card">
+      <h2>需要授权</h2>
+      <p id="permission-reason"></p>
+      <pre id="permission-input"></pre>
+      <div class="permission-actions">
+        <button id="deny" type="button">拒绝</button>
+        <button id="allow" type="button">允许</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/assets/app.js"></script>
+</body>
+</html>

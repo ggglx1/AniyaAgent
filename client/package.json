@@ -1,0 +1,24 @@
+{
+  "name": "happyclaude-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "npm run build:web && npm run build:server && npm run copy:public",
+    "build:web": "esbuild src/web/app.ts --bundle --format=esm --target=es2022 --outfile=dist/public/assets/app.js",
+    "build:server": "tsc -p tsconfig.json",
+    "copy:public": "node scripts/copy-public.mjs",
+    "start": "node dist/server.js",
+    "dev": "npm run build:web && npm run copy:public && tsx src/server.ts"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "@types/ws": "^8.5.13",
+    "esbuild": "^0.24.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "happyclaude-client-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:ui": "npm --prefix .. run build:web && npm --prefix .. run copy:public",
+    "dev": "wrangler dev --port 9537",
+    "predeploy": "npm run build:ui",
+    "deploy": "wrangler deploy",
+    "start": "wrangler dev --port 9537"
+  },
+  "devDependencies": {
+    "wrangler": "^4.35.0"
+  }
+}
