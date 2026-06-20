@@ -1,3 +1,4 @@
+import os
 import re
 import time
 from pathlib import Path
@@ -32,6 +33,7 @@ class Memory:
         self.output_parser = StructuredOutputParser()
         self.memory_dir = self.workdir / ".memory"
         self.memory_index = self.memory_dir / "MEMORY.md"
+        self.match_mode = os.getenv("MEMORY_MATCH_MODE", "llm").strip().lower()
         self.memory_dir.mkdir(parents=True, exist_ok=True)
 
     def parse_frontmatter(self, text: str) -> tuple[dict, str]:
@@ -130,6 +132,8 @@ class Memory:
         recent = self.recent_user_text(messages)
         if not recent.strip():
             return []
+        if self.match_mode in {"keyword", "grep", "local"}:
+            return self.keyword_memory_match(files, recent, max_items)
 
         catalog = "\n".join(
             f"{index}: {item['name']} - {item['description']}"
@@ -146,6 +150,7 @@ class Memory:
 
         try:
             response = self.client.messages.create(
+                task_type="memory_match",
                 model=self.model,
                 system="You select relevant memory records for an agent.",
                 messages=[{"role": "user", "content": prompt}],
@@ -211,6 +216,7 @@ class Memory:
 
         try:
             response = self.client.messages.create(
+                task_type="memory_extract",
                 model=self.model,
                 system="You extract durable memories for a coding agent.",
                 messages=[{"role": "user", "content": prompt}],
@@ -265,6 +271,7 @@ class Memory:
 
         try:
             response = self.client.messages.create(
+                task_type="memory_consolidate",
                 model=self.model,
                 system="You consolidate persistent memories for a coding agent.",
                 messages=[{"role": "user", "content": prompt}],

@@ -56,6 +56,7 @@ class ErrorRecovery:
     def call_model(self, client, state: RecoveryState, *, system, messages, tools):
         return self.with_retry(
             lambda: client.messages.create(
+                task_type="main",
                 model=state.current_model,
                 system=system,
                 messages=messages,

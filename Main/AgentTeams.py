@@ -314,6 +314,7 @@ class AgentTeams:
                 return True
 
             response = self.client.messages.create(
+                task_type="team",
                 model=self.model,
                 system=system,
                 messages=messages[-20:],

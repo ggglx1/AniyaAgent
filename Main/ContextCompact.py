@@ -252,6 +252,7 @@ class ContextCompactor:
             f"{conversation}"
         )
         response = self.client.messages.create(
+            task_type="compact",
             model=self.model,
             system="You summarize agent conversation history for context compaction.",
             messages=[{"role": "user", "content": prompt}],
@@ -350,6 +351,7 @@ class ContextCompactor:
             f"{chunk}"
         )
         response = self.client.messages.create(
+            task_type="compact_chunk",
             model=self.model,
             system="You summarize one chunk of a long coding-agent transcript.",
             messages=[{"role": "user", "content": prompt}],
@@ -372,6 +374,7 @@ class ContextCompactor:
             f"{combined[:60_000]}"
         )
         response = self.client.messages.create(
+            task_type="compact_merge",
             model=self.model,
             system="You merge chunk summaries into a compact recovery summary.",
             messages=[{"role": "user", "content": prompt}],

@@ -11,6 +11,7 @@ from ErrorHandler import DirectErrorHandler, ErrorHandler
 from ErrorRecovery import ErrorRecovery, RecoveryState
 from Hooks import Hooks
 from llm_http import client, ensure_configured, get_settings
+from LlmGateway import LlmGateway
 from Memory import Memory
 from Permissions import Permissions
 from Skills import Skills
@@ -23,14 +24,15 @@ from WorktreeManager import WorktreeManager
 
 SETTINGS = ensure_configured()
 MODEL = SETTINGS.model
+llm_gateway = LlmGateway(client, MODEL, logger=print)
 WORKDIR = Path(__file__).resolve().parent.parent
 permissions = Permissions(WORKDIR)
 hooks = Hooks()
 hooks.register("PreToolUse", permissions.check)
 rounds_without_todo = 0
 skills = Skills(WORKDIR)
-memory = Memory(WORKDIR, client, MODEL)
-compactor = ContextCompactor(WORKDIR, client, MODEL)
+memory = Memory(WORKDIR, llm_gateway, MODEL)
+compactor = ContextCompactor(WORKDIR, llm_gateway, MODEL)
 error_handler: ErrorHandler = DirectErrorHandler()
 error_recovery = ErrorRecovery(MODEL)
 model_output_validator = ModelOutputValidator()
@@ -58,7 +60,7 @@ def teammate_tools_factory(name: str) -> Tools:
 
 agent_teams = AgentTeams(
     WORKDIR,
-    client,
+    llm_gateway,
     MODEL,
     teammate_tools_factory,
     task_system=task_system,
@@ -145,7 +147,7 @@ def run_tool_turn(
 
     while True:
         response = error_recovery.call_model(
-            client,
+            llm_gateway,
             recovery_state,
             system=system,
             messages=current_request_messages,

@@ -92,6 +92,7 @@ class StructuredOutputParser:
                     "Return only valid JSON. Do not include markdown fences or explanation."
                 )
                 response = client.messages.create(
+                    task_type="structured_repair",
                     model=model,
                     system="You repair invalid structured JSON output.",
                     messages=[{"role": "user", "content": prompt}],
