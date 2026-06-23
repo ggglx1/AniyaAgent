@@ -12,6 +12,7 @@ from ErrorRecovery import ErrorRecovery, RecoveryState
 from Hooks import Hooks
 from llm_http import client, ensure_configured, get_settings
 from LlmGateway import LlmGateway
+from LoopGuard import LoopGuard
 from Memory import Memory
 from Permissions import Permissions
 from Skills import Skills
@@ -36,6 +37,7 @@ compactor = ContextCompactor(WORKDIR, llm_gateway, MODEL)
 error_handler: ErrorHandler = DirectErrorHandler()
 error_recovery = ErrorRecovery(MODEL)
 model_output_validator = ModelOutputValidator()
+loop_guard = LoopGuard()
 task_system = TaskSystem(WORKDIR)
 worktree_manager = WorktreeManager(WORKDIR, task_system)
 background_tasks = BackgroundTasks()
@@ -279,10 +281,23 @@ def agent_loop(messages: list) -> None:
 
     reactive_retries = 0
     recovery_state = error_recovery.new_state()
+    loop_state = loop_guard.new_state()
     memories_content = memory.load_memories(messages)
     memory_turn = len(messages) - 1 if messages and isinstance(messages[-1].get("content"), str) else None
 
     while True:
+        if loop_guard.begin_turn(loop_state) == "stop":
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Loop guard stopped the agent after too many iterations without progress. "
+                        "Summarize the blocker and ask the user for a new direction."
+                    ),
+                }
+            )
+            return
+
         inject_cron_jobs(messages)
         inject_system_notifications(messages)
         pre_compact = copy.deepcopy(messages)
@@ -330,6 +345,33 @@ def agent_loop(messages: list) -> None:
             hooks.trigger("Stop", messages)
             memory.extract_memories(pre_compact)
             memory.consolidate_memories()
+            loop_guard.reset(loop_state)
+            return
+
+        loop_action = loop_guard.observe_turn(loop_state, messages, needs_more_tools)
+        if loop_action == "nudge":
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "No progress has been made across repeated turns. "
+                        "Do not repeat the same tool call. Re-evaluate the task, "
+                        "try a different approach, or ask the user for clarification."
+                    ),
+                }
+            )
+            continue
+
+        if loop_action == "stop":
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "The agent is looping without visible progress. "
+                        "Stop now, summarize the blocker, and ask the user for help."
+                    ),
+                }
+            )
             return
 
         if "todo_write" in used_tools:

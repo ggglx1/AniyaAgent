@@ -15,6 +15,7 @@ from ErrorRecovery import ErrorRecovery, RecoveryState
 from Hooks import Hooks
 from llm_http import client, ensure_configured, get_settings
 from LlmGateway import LlmGateway
+from LoopGuard import LoopGuard
 from Memory import Memory
 from Permissions import Permissions
 from Skills import Skills
@@ -30,6 +31,7 @@ class AgentState(TypedDict, total=False):
     used_tools: set[str]
     should_stop: bool
     system: str
+    loop_state: dict
 
 
 SETTINGS = ensure_configured()
@@ -46,6 +48,7 @@ compactor = ContextCompactor(WORKDIR, llm_gateway, MODEL)
 error_handler: ErrorHandler = DirectErrorHandler()
 error_recovery = ErrorRecovery(MODEL)
 model_output_validator = ModelOutputValidator()
+loop_guard = LoopGuard()
 task_system = TaskSystem(WORKDIR)
 worktree_manager = WorktreeManager(WORKDIR, task_system)
 background_tasks = BackgroundTasks()
@@ -247,6 +250,7 @@ def preprocess_node(state: AgentState) -> AgentState:
     state["system"] = build_system()
     state["used_tools"] = set()
     state["should_stop"] = False
+    state["loop_state"] = state.get("loop_state") or loop_guard.new_state().__dict__
     return state
 
 
@@ -279,7 +283,42 @@ def model_and_tool_node(state: AgentState) -> AgentState:
         hooks.trigger("Stop", messages)
         memory.extract_memories(state.get("_pre_compact", messages))
         memory.consolidate_memories()
-    return state
+        loop_guard.reset(loop_guard.new_state())
+        return state
+
+    loop_state = loop_guard.new_state()
+    loop_state.turn_count = int(state["loop_state"].get("turn_count", 0))
+    loop_state.repeat_count = int(state["loop_state"].get("repeat_count", 0))
+    loop_state.last_signature = str(state["loop_state"].get("last_signature", ""))
+
+    loop_action = loop_guard.observe_turn(loop_state, messages, needs_more_tools)
+    state["loop_state"] = loop_state.__dict__
+    if loop_action == "nudge":
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "No progress has been detected across repeated turns. "
+                    "Re-evaluate the approach, avoid repeating the same tool call, "
+                    "and either switch strategy or ask the user for clarification."
+                ),
+            }
+        )
+        state["should_stop"] = False
+        return state
+
+    if loop_action == "stop":
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "The agent is looping without visible progress. "
+                    "Stop, summarize the blocker, and ask the user for help."
+                ),
+            }
+        )
+        state["should_stop"] = True
+        return state
 
 
 def route_after_model(state: AgentState) -> str:
