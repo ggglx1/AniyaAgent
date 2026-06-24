@@ -8,6 +8,7 @@ from typing import Callable
 
 from AuditLog import AuditLog
 from ConversationStore import ConversationStore
+from RuntimeContext import bind_runtime, clear_runtime
 
 
 @dataclass
@@ -72,6 +73,7 @@ class AgentRuntime:
             self.audit.write(run_id, "checkpoint.before", {"path": str(checkpoint_path)})
 
             deadline = started_at + self.max_run_seconds
+            bind_runtime(run_id, session_id, self.audit, self.conversations)
             self.agent_loop(messages)
             if time.time() > deadline:
                 raise TimeoutError(f"Run exceeded {self.max_run_seconds} seconds.")
@@ -118,6 +120,7 @@ class AgentRuntime:
             )
             return result
         finally:
+            clear_runtime()
             lock.release()
 
     def latest_assistant_text(self, messages: list) -> str:
@@ -134,4 +137,3 @@ class AgentRuntime:
 
     def new_run_id(self) -> str:
         return f"run_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
-

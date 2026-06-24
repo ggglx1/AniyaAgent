@@ -16,6 +16,7 @@ from LlmGateway import LlmGateway
 from LoopGuard import LoopGuard
 from Memory import Memory
 from Permissions import Permissions
+import RuntimeContext
 from Skills import Skills
 from StructuredOutput import ModelOutputValidator
 from SystemPrompt import Prompt, SystemPrompt
@@ -150,12 +151,44 @@ def run_tool_turn(
     current_request_messages = request_messages or messages
 
     while True:
-        response = error_recovery.call_model(
-            llm_gateway,
-            recovery_state,
-            system=system,
-            messages=current_request_messages,
-            tools=toolset.definitions,
+        RuntimeContext.event(
+            "llm.request.started",
+            {
+                "label": label,
+                "messages": len(current_request_messages),
+                "tools": len(toolset.definitions),
+                "model": recovery_state.current_model,
+                "max_tokens": recovery_state.max_tokens,
+            },
+        )
+        try:
+            response = error_recovery.call_model(
+                llm_gateway,
+                recovery_state,
+                system=system,
+                messages=current_request_messages,
+                tools=toolset.definitions,
+            )
+        except Exception as exc:
+            RuntimeContext.event(
+                "llm.request.failed",
+                {
+                    "label": label,
+                    "model": recovery_state.current_model,
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            )
+            raise
+        RuntimeContext.event(
+            "llm.request.completed",
+            {
+                "label": label,
+                "stop_reason": getattr(response, "stop_reason", ""),
+                "content_blocks": len(getattr(response, "content", []) or []),
+                "model": recovery_state.current_model,
+                "max_tokens": recovery_state.max_tokens,
+            },
         )
 
         recovery_action = error_recovery.recover_max_tokens(
@@ -188,6 +221,13 @@ def run_tool_turn(
         if block.type == "tool_use":
             used_tools.add(block.name)
             print(f"\n{label}> {block.name}")
+            RuntimeContext.event(
+                "tool.call.started",
+                {
+                    "label": label,
+                    "tool": RuntimeContext.tool_payload(block),
+                },
+            )
 
             if block.name == "compact" and active_compactor is not None:
                 results.append(
@@ -199,11 +239,27 @@ def run_tool_turn(
                 )
                 messages.append({"role": "user", "content": results})
                 messages[:] = active_compactor.compact_history(messages)
+                RuntimeContext.event(
+                    "tool.call.completed",
+                    {
+                        "label": label,
+                        "tool": RuntimeContext.tool_payload(block),
+                        "result": RuntimeContext.preview("[Compacted. Conversation history has been summarized.]"),
+                    },
+                )
                 return True, used_tools
 
             blocked = hooks.trigger("PreToolUse", block)
             if blocked:
                 output = blocked
+                RuntimeContext.event(
+                    "tool.call.blocked",
+                    {
+                        "label": label,
+                        "tool": RuntimeContext.tool_payload(block),
+                        "reason": str(blocked),
+                    },
+                )
             elif background_tasks.should_run_background(block):
                 bg_id = background_tasks.start(block, toolset.execute)
                 output = (
@@ -214,6 +270,14 @@ def run_tool_turn(
                 output = toolset.execute(block)
             hooks.trigger("PostToolUse", block, output)
             print(str(output)[:200])
+            RuntimeContext.event(
+                "tool.call.completed",
+                {
+                    "label": label,
+                    "tool": RuntimeContext.tool_payload(block),
+                    "result": RuntimeContext.preview(output),
+                },
+            )
             results.append(
                 {
                     "type": "tool_result",
@@ -289,6 +353,7 @@ def agent_loop(messages: list) -> None:
 
     while True:
         if loop_guard.begin_turn(loop_state) == "stop":
+            RuntimeContext.event("loop.guard.stopped", {"reason": "max_turns"})
             messages.append(
                 {
                     "role": "user",
@@ -300,6 +365,7 @@ def agent_loop(messages: list) -> None:
             )
             return
 
+        RuntimeContext.begin_turn(messages)
         inject_cron_jobs(messages)
         inject_system_notifications(messages)
         pre_compact = copy.deepcopy(messages)
@@ -331,8 +397,13 @@ def agent_loop(messages: list) -> None:
                 active_compactor=compactor,
                 recovery_state=recovery_state,
             )
+            RuntimeContext.end_turn(messages, needs_more_tools, used_tools)
             reactive_retries = 0
         except Exception as exc:
+            RuntimeContext.event(
+                "loop.turn.failed",
+                {"error_type": type(exc).__name__, "message": str(exc)},
+            )
             if compactor.is_prompt_too_long(exc) and reactive_retries < MAX_REACTIVE_RETRIES:
                 level = reactive_retries + 1
                 print(f"[reactive compact level {level}]")
@@ -352,6 +423,7 @@ def agent_loop(messages: list) -> None:
 
         loop_action = loop_guard.observe_turn(loop_state, messages, needs_more_tools)
         if loop_action == "nudge":
+            RuntimeContext.event("loop.guard.nudged", {"reason": "repeated_turn_signature"})
             messages.append(
                 {
                     "role": "user",
@@ -365,6 +437,7 @@ def agent_loop(messages: list) -> None:
             continue
 
         if loop_action == "stop":
+            RuntimeContext.event("loop.guard.stopped", {"reason": "repeated_turn_signature"})
             messages.append(
                 {
                     "role": "user",
