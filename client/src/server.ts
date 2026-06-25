@@ -51,8 +51,8 @@ const bridgePath = resolve(clientRoot, 'python/happyclaude_bridge.py');
 const port = Number(process.env.HAPPYCLAUDE_CLIENT_PORT || process.env.PORT || 9527);
 const workerUrl = String(process.env.HAPPYCLAUDE_WORKER_URL || '').trim().replace(/\/$/, '');
 const sessionId = String(process.env.HAPPYCLAUDE_SESSION_ID || '').trim() || randomUUID();
-const defaultCondaPython = resolve(process.env.USERPROFILE || '', 'anaconda3/envs/Claude/python.exe');
-const fallbackCondaPython = resolve(process.env.USERPROFILE || '', 'anaconda3/envs/claude/python.exe');
+const defaultCondaPython = resolve(process.env.USERPROFILE || '', 'anaconda3/envs/claude/python.exe');
+const fallbackCondaPython = resolve(process.env.USERPROFILE || '', 'anaconda3/envs/Claude/python.exe');
 const localVenvPython = resolve(repoRoot, 'Main/.venv/Scripts/python.exe');
 const pythonCommand = process.env.HAPPYCLAUDE_PYTHON
   || (existsSync(defaultCondaPython)
