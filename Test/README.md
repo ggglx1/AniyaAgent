@@ -62,6 +62,32 @@ Run one loop benchmark scenario only:
 .\Test\run_agent_benchmark.ps1 -Scenario tools
 ```
 
+Run a higher-round conversation benchmark:
+
+```powershell
+.\Test\run_multi_round_benchmark.ps1 -Rounds 30
+```
+
+For high-round runs, inspect these columns in `latest_agent_benchmark_metrics.csv`:
+
+- `round_index`
+- `duration_ms`
+- `duration_delta_ms`
+- `stage_setup_ms`
+- `stage_llm_ms`
+- `stage_wrapup_ms`
+- `stored_messages_after_run`
+- `conversation_chars_after_run`
+- `loop_turns`
+- `loop_nudges`
+- `loop_stops`
+
+Safety red-team cases such as path escape and dangerous shell commands are not run by default. Run them explicitly:
+
+```powershell
+.\Test\run_agent_benchmark.ps1 -Scenario tools -IncludeSafety
+```
+
 By default this uses:
 
 ```text
@@ -113,8 +139,9 @@ The real benchmark covers:
 - long-context impact
 - loop idle detection
 - tool behavior success and failure
+- model output format errors
 
-The current scope is the HappyClaude loop/runtime core. Web and mobile bridge testing is intentionally out of scope for this test package.
+The current default scope is the HappyClaude loop/runtime core: latency analysis, tool-call correctness, model-output format health, and sustained operation. Web/mobile bridge testing and destructive safety probes are intentionally out of the default path.
 
 The benchmark data comes from:
 
