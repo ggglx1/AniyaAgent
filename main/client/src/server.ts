@@ -48,18 +48,18 @@ type SseEvent = {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const clientRoot = resolve(__dirname, '..');
-const repoRoot = resolve(clientRoot, '..');
+const repoRoot = resolve(clientRoot, '../..');
 const publicDir = resolve(clientRoot, 'dist/public');
 const sourcePublicDir = resolve(clientRoot, 'public');
 const staticDir = existsSync(publicDir) ? publicDir : sourcePublicDir;
-const runWebPath = resolve(repoRoot, 'Channel/run_web.py');
+const runWebPath = resolve(repoRoot, 'main/channel/run_web.py');
 const port = Number(process.env.ANIYAAGENT_CLIENT_PORT || process.env.PORT || 9527);
 const webChannelPort = Number(process.env.ANIYAAGENT_WEB_CHANNEL_PORT || 9528);
 const webChannelUrl = String(process.env.ANIYAAGENT_WEB_CHANNEL_URL || `http://127.0.0.1:${webChannelPort}`).replace(/\/$/, '');
 const conversationId = String(process.env.ANIYAAGENT_WEB_CONVERSATION_ID || 'web');
 const defaultCondaPython = resolve(process.env.USERPROFILE || '', 'anaconda3/envs/claude/python.exe');
 const fallbackCondaPython = resolve(process.env.USERPROFILE || '', 'anaconda3/envs/Claude/python.exe');
-const localVenvPython = resolve(repoRoot, 'Main/.venv/Scripts/python.exe');
+const localVenvPython = resolve(repoRoot, 'main/.venv/Scripts/python.exe');
 const pythonCommand = process.env.ANIYAAGENT_PYTHON
   || (existsSync(defaultCondaPython)
     ? defaultCondaPython

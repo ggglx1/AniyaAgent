@@ -1,6 +1,6 @@
 # AniyaAgent
 
-AniyaAgent is a personal local Agent project for coding, task orchestration, and remote operation from a mobile browser.
+AniyaAgent is a personal local assistant for task orchestration, daily workflows, reminders, knowledge, and remote operation from a mobile browser.
 
 It runs the Agent runtime on your own computer, supports local tool execution, persistent tasks, memory, background jobs, multi-agent collaboration, Git worktree isolation, and optional LangGraph workflow execution. A lightweight TypeScript client lets you operate the local Agent from a phone through LAN access or a Cloudflare Worker relay.
 
@@ -35,12 +35,12 @@ Phone Browser -> Cloudflare Worker Relay <- Local AniyaAgent Client -> Python Ag
 Install Python dependencies:
 
 ```powershell
-cd C:\Users\24021\Desktop\java\learnclaudecode\AniyaAgent\Main
-pip install -r requirements.txt
-Copy-Item .env.example .env
+cd C:\Users\24021\Desktop\java\learnclaudecode\AniyaAgent
+pip install -r main/requirements.txt
+Copy-Item main/.env.example main/.env
 ```
 
-Edit `Main/.env`:
+Edit `main/.env`:
 
 ```env
 ANTHROPIC_API_KEY=your_api_key_here
@@ -51,13 +51,13 @@ ANTHROPIC_BASE_URL=https://api.anthropic.com
 Run CLI:
 
 ```powershell
-python MainLoop.py
+python -m main.agent.main_loop
 ```
 
 Run LangGraph version:
 
 ```powershell
-python MainLoopLangGraph.py
+python -m main.agent.main_loop_langgraph
 ```
 
 ## Mobile Client
@@ -65,7 +65,7 @@ python MainLoopLangGraph.py
 Start local web client:
 
 ```powershell
-cd C:\Users\24021\Desktop\java\learnclaudecode\AniyaAgent\client
+cd C:\Users\24021\Desktop\java\learnclaudecode\AniyaAgent\main\client
 npm install
 npm run build
 npm start
@@ -77,7 +77,7 @@ Open the printed LAN URL from your phone, for example:
 http://192.168.x.x:9527
 ```
 
-For remote access, deploy the Worker under `client/worker`, then start the local client with:
+For remote access, deploy the Worker under `main/client/worker`, then start the local client with:
 
 ```powershell
 $env:ANIYAAGENT_WORKER_URL="https://your-worker.workers.dev"
@@ -100,7 +100,7 @@ MEMORY_MATCH_MODE=keyword
 
 ## Security
 
-Keep real credentials in `Main/.env`; do not commit them.
+Keep real credentials in `main/.env`; do not commit them.
 
 The mobile client is intended for personal use. Use a long random session id for remote relay mode and do not expose it as a public multi-user service without authentication, authorization, audit logs, and stronger sandboxing.
 

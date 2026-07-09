@@ -4,7 +4,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from TaskSystem import TaskSystem
+from main.tasks.task_system import TaskSystem
 
 
 class WorktreeManager:

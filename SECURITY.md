@@ -4,7 +4,7 @@
 
 Do not commit real API keys, access tokens, cookies, private endpoints, or local credential files.
 
-Use `Main/.env` for local credentials:
+Use `main/.env` for local credentials:
 
 ```env
 ANTHROPIC_API_KEY=your_api_key_here
@@ -12,7 +12,7 @@ MODEL_ID=your_model_id_here
 ANTHROPIC_BASE_URL=https://api.anthropic.com
 ```
 
-`Main/.env` is ignored by Git. `Main/.env.example` is safe to commit because it contains placeholders only.
+`main/.env` is ignored by Git. `main/.env.example` is safe to commit because it contains placeholders only.
 
 ## Before Making The Repository Public
 

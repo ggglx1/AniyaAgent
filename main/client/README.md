@@ -1,6 +1,6 @@
 # AniyaAgent Client
 
-TypeScript + Cloudflare Worker client for connecting a phone browser to the Python agent under `AniyaAgent/Main`.
+TypeScript + Cloudflare Worker client for connecting a phone browser to the Python agent under `AniyaAgent/main`.
 
 The local client actively connects to Cloudflare Worker. Your phone only visits the Worker URL, so the computer does not need to expose a public port.
 
@@ -8,13 +8,13 @@ The local client actively connects to Cloudflare Worker. Your phone only visits 
 Phone Browser --https/wss--> Cloudflare Worker (Durable Object relay)
                             ^
                             |
-Local client (TypeScript Node) --stdio/jsonl--> Python bridge --import--> MainLoop.agent_loop
+Local client (TypeScript Node) --stdio/jsonl--> Python bridge --import--> main.agent.main_loop.agent_loop
 ```
 
 ## Deploy Cloudflare Worker
 
 ```powershell
-cd C:\Users\24021\Desktop\java\learnclaudecode\AniyaAgent\client
+cd C:\Users\24021\Desktop\java\learnclaudecode\AniyaAgent\main\client
 npm install
 npm run build
 cd worker
@@ -22,7 +22,7 @@ npm install
 Copy-Item wrangler.example.jsonc wrangler.jsonc
 ```
 
-Edit `client/worker/wrangler.jsonc`:
+Edit `main/client/worker/wrangler.jsonc`:
 
 - `name`: Worker name, for example `aniyaagent-client`
 - Add `account_id` if your Wrangler setup requires it
@@ -43,7 +43,7 @@ https://aniyaagent-client.<your-subdomain>.workers.dev
 ## Start Local Client
 
 ```powershell
-cd C:\Users\24021\Desktop\java\learnclaudecode\AniyaAgent\client
+cd C:\Users\24021\Desktop\java\learnclaudecode\AniyaAgent\main\client
 $env:ANIYAAGENT_WORKER_URL="https://aniyaagent-client.<your-subdomain>.workers.dev"
 $env:ANIYAAGENT_SESSION_ID="replace-with-a-long-random-session"
 npm start
@@ -63,7 +63,7 @@ Open that URL on your phone to connect to the local AniyaAgent instance.
 If `ANIYAAGENT_WORKER_URL` is not set, the client runs in LAN mode:
 
 ```powershell
-cd C:\Users\24021\Desktop\java\learnclaudecode\AniyaAgent\client
+cd C:\Users\24021\Desktop\java\learnclaudecode\AniyaAgent\main\client
 npm start
 ```
 

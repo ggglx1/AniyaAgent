@@ -11,15 +11,13 @@ from pathlib import Path
 
 
 CLIENT_DIR = Path(__file__).resolve().parents[1]
-ROOT = CLIENT_DIR.parent
-MAIN_DIR = ROOT / "Main"
-sys.path.insert(0, str(MAIN_DIR))
+ROOT = CLIENT_DIR.parents[1]
 sys.path.insert(0, str(ROOT))
 
-import MainLoop  # noqa: E402
-from Channel import ChannelMessage, TrustLevel  # noqa: E402
-from Channel.local import CallbackChannel  # noqa: E402
-from Channel.types import ChannelKind  # noqa: E402
+from main.agent import main_loop as MainLoop  # noqa: E402
+from main.channel import ChannelMessage, TrustLevel  # noqa: E402
+from main.channel.local import CallbackChannel  # noqa: E402
+from main.channel.types import ChannelKind  # noqa: E402
 
 write_lock = threading.Lock()
 permission_replies: dict[str, "queue.Queue[bool]"] = {}

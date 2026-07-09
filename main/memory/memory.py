@@ -9,7 +9,7 @@ from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from StructuredOutput import StructuredOutputParser
+from main.llm.structured_output import StructuredOutputParser
 
 
 class Memory:
@@ -594,7 +594,7 @@ class Memory:
             else "(none)"
         )
         prompt = (
-            "Extract durable atomic memories for a coding agent.\n"
+            "Extract durable atomic memories for a personal assistant.\n"
             "Return small facts, not broad summaries. Prefer one memory per stable preference, "
             "project fact, recurring instruction, or long-lived constraint.\n"
             "Return a JSON array. Each item: {name, type, scope, description, body, source, confidence}.\n"
@@ -625,7 +625,7 @@ class Memory:
             response = self.client.messages.create(
                 task_type="memory_extract",
                 model=self.model,
-                system="You extract durable memories for a coding agent.",
+                system="You extract durable memories for a personal assistant.",
                 messages=[{"role": "user", "content": prompt}],
                 tools=[],
                 max_tokens=800,
@@ -756,7 +756,7 @@ class Memory:
             response = self.client.messages.create(
                 task_type="memory_consolidate",
                 model=self.model,
-                system="You consolidate persistent memories for a coding agent.",
+                system="You consolidate persistent memories for a personal assistant.",
                 messages=[{"role": "user", "content": prompt}],
                 tools=[],
                 max_tokens=3000,

@@ -9,13 +9,11 @@ import argparse
 import os
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-MAIN_DIR = ROOT / "Main"
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(MAIN_DIR))
 
-import MainLoop  # noqa: E402
-from Channel.weixin import DEFAULT_BASE_URL, WeixinChannel, default_credentials_path  # noqa: E402
+from main.agent import main_loop as MainLoop  # noqa: E402
+from main.channel.weixin import DEFAULT_BASE_URL, WeixinChannel, default_credentials_path  # noqa: E402
 
 
 def main() -> None:

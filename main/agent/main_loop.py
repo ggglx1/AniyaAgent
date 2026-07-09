@@ -5,42 +5,42 @@ import threading
 import time
 from pathlib import Path
 
-from AgentTeams import AgentTeams
-from AgentRuntime import AgentRuntime
-from BackgroundTasks import BackgroundTasks
-from ContextCompact import ContextCompactor
-from CronScheduler import CronScheduler
-from ErrorHandler import DirectErrorHandler, ErrorHandler
-from ErrorRecovery import ErrorRecovery, RecoveryState
-from Hooks import Hooks
-from llm_http import client, ensure_configured, get_settings
-from LlmGateway import LlmGateway
-from LoopGuard import LoopGuard
-from Memory import Memory
-from Permissions import Permissions
-import RuntimeContext
-from Skills import Skills
-from StructuredOutput import ModelOutputValidator
-from SystemPrompt import Prompt, SystemPrompt
-from TaskSystem import TaskSystem
-from Tools import Tools
-from WorktreeManager import WorktreeManager
+from main.teams.agent_teams import AgentTeams
+from main.agent.runtime import AgentRuntime
+from main.tasks.background_tasks import BackgroundTasks
+from main.storage.context_compact import ContextCompactor
+from main.tasks.cron_scheduler import CronScheduler
+from main.agent.error_handler import DirectErrorHandler, ErrorHandler
+from main.agent.error_recovery import ErrorRecovery, RecoveryState
+from main.tools.hooks import Hooks
+from main.llm.http import client, ensure_configured, get_settings
+from main.llm.gateway import LlmGateway
+from main.agent.loop_guard import LoopGuard
+from main.memory.memory import Memory
+from main.tools.permissions import Permissions
+import main.agent.runtime_context as RuntimeContext
+from main.prompt.skills import Skills
+from main.llm.structured_output import ModelOutputValidator
+from main.prompt.system_prompt import Prompt, SystemPrompt
+from main.tasks.task_system import TaskSystem
+from main.tools.tools import Tools
+from main.teams.worktree_manager import WorktreeManager
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
-CHANNEL_DIR = ROOT_DIR / "Channel"
+ROOT_DIR = Path(__file__).resolve().parents[2]
+CHANNEL_DIR = ROOT_DIR / "main" / "channel"
 import sys
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from Channel import ChannelMessage, ChannelRegistry, ChannelRuntime, TrustLevel  # noqa: E402
-from Channel.local import MemoryChannel, StdoutChannel  # noqa: E402
-from Channel.types import ChannelKind  # noqa: E402
+from main.channel import ChannelMessage, ChannelRegistry, ChannelRuntime, TrustLevel  # noqa: E402
+from main.channel.local import MemoryChannel, StdoutChannel  # noqa: E402
+from main.channel.types import ChannelKind  # noqa: E402
 
 
 SETTINGS = ensure_configured()
 MODEL = SETTINGS.model
 llm_gateway = LlmGateway(client, MODEL, logger=print)
-WORKDIR = Path(__file__).resolve().parent.parent
+WORKDIR = ROOT_DIR
 permissions = Permissions(WORKDIR)
 hooks = Hooks()
 hooks.register("PreToolUse", permissions.check)

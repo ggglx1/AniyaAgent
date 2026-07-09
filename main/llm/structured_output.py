@@ -2,7 +2,7 @@ import json
 import re
 from dataclasses import dataclass
 
-from ToolResult import ToolCallValidator
+from main.tools.tool_result import ToolCallValidator
 
 
 class StructuredOutputError(ValueError):

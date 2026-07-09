@@ -4,7 +4,7 @@
 
 AniyaAgent should evolve from a personal Agent demo into a CowAgent-inspired personal, multi-channel, general-purpose Agent platform.
 
-It should not be positioned as a pure coding agent. Coding remains an important capability, but the product center should be personal life, personal tasks, daily workflows, long-term memory, and multi-entry access.
+It should be positioned as a personal assistant. The product center is personal life, personal tasks, daily workflows, long-term memory, and multi-entry access.
 
 Core positioning:
 
@@ -15,7 +15,7 @@ Based on CowAgent, AniyaAgent should move toward:
 - Multi-channel entry points instead of a single Web/CLI interface.
 - One shared Agent brain instead of separate logic per entry point.
 - Memory, tasks, skills, scheduling, and the control console as one personal workspace.
-- Coding as a tool capability inside personal workflows, not the only product focus.
+- Local tool capabilities serve personal workflows rather than becoming the product focus.
 
 ## 2. Current State
 
@@ -40,7 +40,7 @@ Main gaps:
 - External messaging platforms are not yet part of the product.
 - Scheduled jobs are not yet connected to unified channel delivery and personal reminders.
 - Memory, tasks, skills, logs, and scheduling are not yet exposed as one coherent personal control center.
-- The product narrative still leans toward coding and execution, and needs to shift toward personal life and workflows.
+- The product narrative should stay centered on personal life and workflows, with local execution as supporting capability.
 
 ## 3. Product Principles
 
@@ -257,7 +257,7 @@ After adopting a CowAgent-like multi-channel shape, channel trust levels become 
 
 ### Phase 0: Product alignment
 
-Goal: shift AniyaAgent's target from "local coding Agent demo" to "CowAgent-inspired personal multi-channel Agent platform".
+Goal: align AniyaAgent as a CowAgent-inspired personal multi-channel Agent platform.
 
 Outcome:
 
@@ -352,7 +352,7 @@ To measure whether AniyaAgent is moving toward a CowAgent-like personal platform
 - Whether memory is inspected, corrected, and trusted by the user.
 - Whether the Web console becomes the primary management entry.
 - Whether external channels carry real daily workflows.
-- Whether coding requests become one tool capability rather than the only use case.
+- Whether daily personal workflows become the main usage pattern across channels.
 
 ## 9. Key Risks
 
@@ -361,7 +361,7 @@ To measure whether AniyaAgent is moving toward a CowAgent-like personal platform
 - A weak Web console that cannot manage memory, tasks, and channels.
 - Local execution being too powerful for external-channel triggers.
 - Opaque memory causing the user to distrust the Agent.
-- The product remaining a coding demo instead of shifting to personal workflows.
+- The product drifting back toward an execution demo instead of staying focused on personal workflows.
 
 ## 10. Strategic Recommendation
 

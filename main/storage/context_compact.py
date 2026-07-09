@@ -245,7 +245,7 @@ class ContextCompactor:
     def summarize_history(self, messages: list) -> str:
         conversation = json.dumps(messages, ensure_ascii=False, default=str)[:80_000]
         prompt = (
-            "Summarize this coding-agent conversation so work can continue.\n"
+            "Summarize this personal-assistant conversation so work can continue.\n"
             "Preserve: 1. current goal, 2. key findings/decisions, 3. files read/changed, "
             "4. remaining work, 5. user constraints.\n"
             "Be compact but concrete.\n\n"
@@ -344,7 +344,7 @@ class ContextCompactor:
 
     def summarize_chunk(self, chunk: str, index: int, total: int) -> str:
         prompt = (
-            f"Summarize chunk {index}/{total} of a coding-agent conversation.\n"
+            f"Summarize chunk {index}/{total} of a personal-assistant conversation.\n"
             "Preserve concrete facts: current goal, decisions, files, errors, tool results, "
             "user constraints, and remaining work.\n"
             "Be compact but do not omit important technical details.\n\n"
@@ -353,7 +353,7 @@ class ContextCompactor:
         response = self.client.messages.create(
             task_type="compact_chunk",
             model=self.model,
-            system="You summarize one chunk of a long coding-agent transcript.",
+            system="You summarize one chunk of a long personal-assistant transcript.",
             messages=[{"role": "user", "content": prompt}],
             tools=[],
             max_tokens=1200,

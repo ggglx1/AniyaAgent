@@ -3,12 +3,12 @@ import subprocess
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-from AgentTeams import AgentTeams
-from BackgroundTasks import BackgroundTasks
-from CronScheduler import CronScheduler
-from TaskSystem import TaskSystem
-from ToolResult import ToolCallValidator, ToolResult
-from WorktreeManager import WorktreeManager
+from main.teams.agent_teams import AgentTeams
+from main.tasks.background_tasks import BackgroundTasks
+from main.tasks.cron_scheduler import CronScheduler
+from main.tasks.task_system import TaskSystem
+from main.tools.tool_result import ToolCallValidator, ToolResult
+from main.teams.worktree_manager import WorktreeManager
 
 
 class Tool(ABC):

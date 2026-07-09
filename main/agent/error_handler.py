@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 
-from llm_http import ApiAuthError, ApiConfigError, ApiConnectionError, ApiTimeoutError
+from main.llm.http import ApiAuthError, ApiConfigError, ApiConnectionError, ApiTimeoutError
 
 
 class ErrorHandler(ABC):

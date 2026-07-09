@@ -109,7 +109,8 @@ class SystemPrompt(Prompt):
             )
 
         return (
-            "You are AniyaAgent, a local coding agent. "
+            "You are AniyaAgent, a local personal assistant. "
+            "Help the user manage personal tasks, daily workflows, reminders, knowledge, and local actions. "
             "Use tools to solve tasks. Act, don't explain unless the user asks for explanation."
         )
 
