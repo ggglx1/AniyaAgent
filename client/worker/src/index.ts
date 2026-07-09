@@ -1,8 +1,8 @@
-export { HappyClaudeSession } from './session';
+export { AniyaAgentSession } from './session';
 
 type Env = {
   ASSETS: Fetcher;
-  HAPPYCLAUDE_SESSION: DurableObjectNamespace;
+  ANIYAAGENT_SESSION: DurableObjectNamespace;
 };
 
 function parseCookie(header: string | null, name: string): string {
@@ -13,7 +13,7 @@ function parseCookie(header: string | null, name: string): string {
 
 function sessionIdFrom(request: Request): string {
   const url = new URL(request.url);
-  return url.searchParams.get('session') || parseCookie(request.headers.get('Cookie'), 'happyclaude_session');
+  return url.searchParams.get('session') || parseCookie(request.headers.get('Cookie'), 'aniyaagent_session');
 }
 
 export default {
@@ -25,8 +25,8 @@ export default {
       if (!sessionId || sessionId === 'default') {
         return new Response('Missing session', { status: 400 });
       }
-      const id = env.HAPPYCLAUDE_SESSION.idFromName(sessionId);
-      return env.HAPPYCLAUDE_SESSION.get(id).fetch(request);
+      const id = env.ANIYAAGENT_SESSION.idFromName(sessionId);
+      return env.ANIYAAGENT_SESSION.get(id).fetch(request);
     }
 
     const sessionParam = url.searchParams.get('session');
@@ -37,7 +37,7 @@ export default {
         status: 301,
         headers: {
           Location: clean.toString(),
-          'Set-Cookie': `happyclaude_session=${encodeURIComponent(sessionParam)}; Path=/; SameSite=Lax; Secure; Max-Age=31536000`,
+          'Set-Cookie': `aniyaagent_session=${encodeURIComponent(sessionParam)}; Path=/; SameSite=Lax; Secure; Max-Age=31536000`,
         },
       });
     }

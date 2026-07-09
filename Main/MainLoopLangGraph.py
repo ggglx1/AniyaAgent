@@ -95,6 +95,13 @@ tools = Tools(
 )
 
 
+TODO_REMINDER = (
+    "If the current task is multi-step and the todo list has not been updated recently, "
+    "consider calling todo_write before continuing. Do not interrupt a final answer after "
+    "tool results just to update todos."
+)
+
+
 def extract_text(message_content) -> str:
     if not isinstance(message_content, list):
         return str(message_content)
@@ -122,6 +129,32 @@ def build_request_messages(messages: list, memories_content: str, memory_turn: i
     return request_messages
 
 
+def message_has_tool_result(message: dict | None) -> bool:
+    if not message or message.get("role") != "user":
+        return False
+    content = message.get("content")
+    if not isinstance(content, list):
+        return False
+    return any(isinstance(block, dict) and block.get("type") == "tool_result" for block in content)
+
+
+def todo_runtime_reminders(messages: list) -> list[str]:
+    if rounds_without_todo < 3:
+        return []
+    if message_has_tool_result(messages[-1] if messages else None):
+        return []
+    return [TODO_REMINDER]
+
+
+def notification_blocks_to_reminders(notifications: list[dict]) -> list[str]:
+    reminders = []
+    for block in notifications:
+        text = block.get("text") if isinstance(block, dict) else str(block)
+        if text:
+            reminders.append(str(text))
+    return reminders
+
+
 def collect_system_notifications() -> list[dict]:
     notifications = []
     for text in background_tasks.collect_notifications():
@@ -141,19 +174,18 @@ def inject_cron_jobs(messages: list) -> None:
         )
 
 
-def inject_system_notifications(messages: list) -> None:
-    notifications = collect_system_notifications()
-    if notifications:
-        messages.append({"role": "user", "content": notifications})
-
-
-def build_system() -> str:
+def build_system(runtime_reminders: list[str] | None = None) -> str:
     context = prompt_builder.parent_context(tools.definitions)
-    return prompt_builder.get_system_prompt(context)
+    system = prompt_builder.get_system_prompt(context)
+    if runtime_reminders:
+        reminders = "\n".join(f"- {reminder}" for reminder in runtime_reminders)
+        system = f"{system}\n\n<runtime_reminders>\n{reminders}\n</runtime_reminders>"
+    return system
 
 
 def run_tool_turn(
     messages: list,
+    system: str,
     request_messages: list | None = None,
     active_compactor: ContextCompactor | None = None,
     recovery_state: RecoveryState | None = None,
@@ -165,7 +197,7 @@ def run_tool_turn(
         response = error_recovery.call_model(
             llm_gateway,
             recovery_state,
-            system=build_system(),
+            system=system,
             messages=current_request_messages,
             tools=tools.definitions,
         )
@@ -232,22 +264,26 @@ def run_tool_turn(
             }
         )
 
-    user_content = collect_system_notifications()
-    user_content.extend(results)
-    messages.append({"role": "user", "content": user_content})
+    messages.append({"role": "user", "content": results})
     return True, used_tools
 
 
 def preprocess_node(state: AgentState) -> AgentState:
+    global rounds_without_todo
+
     messages = state["messages"]
     inject_cron_jobs(messages)
-    inject_system_notifications(messages)
+    runtime_system_notifications = collect_system_notifications()
     pre_compact = copy.deepcopy(messages)
     messages[:] = compactor.preprocess(messages)
     if compactor.should_auto_compact(messages):
         messages[:] = compactor.compact_history(messages)
     state["_pre_compact"] = pre_compact
-    state["system"] = build_system()
+    runtime_reminders = notification_blocks_to_reminders(runtime_system_notifications)
+    runtime_reminders.extend(todo_runtime_reminders(messages))
+    if runtime_reminders:
+        rounds_without_todo = 0
+    state["system"] = build_system(runtime_reminders)
     state["used_tools"] = set()
     state["should_stop"] = False
     state["loop_state"] = state.get("loop_state") or loop_guard.new_state().__dict__
@@ -255,6 +291,8 @@ def preprocess_node(state: AgentState) -> AgentState:
 
 
 def model_and_tool_node(state: AgentState) -> AgentState:
+    global rounds_without_todo
+
     messages = state["messages"]
     memories_content = memory.load_memories(messages)
     memory_turn = len(messages) - 1 if messages and isinstance(messages[-1].get("content"), str) else None
@@ -263,6 +301,7 @@ def model_and_tool_node(state: AgentState) -> AgentState:
     try:
         needs_more_tools, used_tools = run_tool_turn(
             messages,
+            state.get("system") or build_system(),
             request_messages=request_messages,
             active_compactor=compactor,
             recovery_state=error_recovery.new_state(),
@@ -285,6 +324,11 @@ def model_and_tool_node(state: AgentState) -> AgentState:
         memory.consolidate_memories()
         loop_guard.reset(loop_guard.new_state())
         return state
+
+    if "todo_write" in used_tools:
+        rounds_without_todo = 0
+    else:
+        rounds_without_todo += 1
 
     loop_state = loop_guard.new_state()
     loop_state.turn_count = int(state["loop_state"].get("turn_count", 0))
@@ -345,7 +389,7 @@ def run_once(query: str, history: list) -> None:
 
 
 if __name__ == "__main__":
-    print("HappyClaude: Agent Loop (LangGraph)")
+    print("AniyaAgent: Agent Loop (LangGraph)")
     print(f"Model: {get_settings().model}")
     print("Type a task and press Enter. Type q to quit.\n")
 

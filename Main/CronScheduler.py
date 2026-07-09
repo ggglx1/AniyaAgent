@@ -13,6 +13,9 @@ class CronJob:
     prompt: str
     recurring: bool = True
     durable: bool = True
+    target_channel: str = "cron"
+    conversation_id: str = "scheduled"
+    user_id: str = "scheduler"
 
 
 class CronScheduler:
@@ -38,6 +41,9 @@ class CronScheduler:
         prompt: str,
         recurring: bool = True,
         durable: bool = True,
+        target_channel: str = "cron",
+        conversation_id: str = "scheduled",
+        user_id: str = "scheduler",
     ) -> str:
         error = self.validate_cron(cron)
         if error:
@@ -49,12 +55,15 @@ class CronScheduler:
             prompt=prompt,
             recurring=recurring,
             durable=durable,
+            target_channel=target_channel or "cron",
+            conversation_id=conversation_id or "scheduled",
+            user_id=user_id or "scheduler",
         )
         with self.lock:
             self.jobs[job.id] = job
             if durable:
                 self.save_durable_jobs()
-        return f"Scheduled {job.id}: {cron} -> {prompt}"
+        return f"Scheduled {job.id}: {cron} -> {prompt} target_channel={job.target_channel}"
 
     def list_jobs(self) -> str:
         with self.lock:
@@ -62,7 +71,8 @@ class CronScheduler:
         if not jobs:
             return "No scheduled cron jobs."
         return "\n".join(
-            f"{job.id}: {job.cron} recurring={job.recurring} durable={job.durable} prompt={job.prompt}"
+            f"{job.id}: {job.cron} recurring={job.recurring} durable={job.durable} "
+            f"target_channel={job.target_channel} conversation={job.conversation_id} prompt={job.prompt}"
             for job in jobs
         )
 

@@ -1,11 +1,11 @@
 ---
-name: happyclaude-agent
-description: Guidelines for extending the HappyClaude learning agent.
+name: aniyaagent-agent
+description: Guidelines for extending the AniyaAgent learning agent.
 ---
 
-# HappyClaude Agent
+# AniyaAgent Agent
 
-Use this skill when modifying the local HappyClaude Python agent.
+Use this skill when modifying the local AniyaAgent Python agent.
 
 ## Rules
 

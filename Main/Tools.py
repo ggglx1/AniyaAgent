@@ -522,6 +522,18 @@ class ScheduleCronTool(Tool):
                     "prompt": {"type": "string"},
                     "recurring": {"type": "boolean"},
                     "durable": {"type": "boolean"},
+                    "target_channel": {
+                        "type": "string",
+                        "description": "Channel id to deliver the scheduled result to, e.g. web, cli, cron.",
+                    },
+                    "conversation_id": {
+                        "type": "string",
+                        "description": "Conversation id within the target channel.",
+                    },
+                    "user_id": {
+                        "type": "string",
+                        "description": "User id that owns this scheduled task.",
+                    },
                 },
                 "required": ["cron", "prompt"],
             },
@@ -533,8 +545,19 @@ class ScheduleCronTool(Tool):
         prompt: str,
         recurring: bool = True,
         durable: bool = True,
+        target_channel: str = "cron",
+        conversation_id: str = "scheduled",
+        user_id: str = "scheduler",
     ) -> str:
-        return self.scheduler.schedule(cron, prompt, recurring, durable)
+        return self.scheduler.schedule(
+            cron,
+            prompt,
+            recurring,
+            durable,
+            target_channel,
+            conversation_id,
+            user_id,
+        )
 
 
 class ListCronsTool(Tool):

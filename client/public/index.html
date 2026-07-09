@@ -3,18 +3,26 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <title>HappyClaude</title>
+  <title>AniyaAgent</title>
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
   <main class="shell">
     <header class="topbar">
       <div>
-        <h1>HappyClaude</h1>
+        <h1>AniyaAgent</h1>
         <p id="status">连接中...</p>
       </div>
       <span id="dot" class="dot"></span>
     </header>
+
+    <section class="channels-panel">
+      <div class="panel-title">
+        <span>Channels</span>
+        <button id="refresh-channels" type="button">Refresh</button>
+      </div>
+      <div id="channels" class="channels"></div>
+    </section>
 
     <section id="messages" class="messages"></section>
 

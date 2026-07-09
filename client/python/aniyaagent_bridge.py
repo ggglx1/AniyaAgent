@@ -14,8 +14,12 @@ CLIENT_DIR = Path(__file__).resolve().parents[1]
 ROOT = CLIENT_DIR.parent
 MAIN_DIR = ROOT / "Main"
 sys.path.insert(0, str(MAIN_DIR))
+sys.path.insert(0, str(ROOT))
 
 import MainLoop  # noqa: E402
+from Channel import ChannelMessage, TrustLevel  # noqa: E402
+from Channel.local import CallbackChannel  # noqa: E402
+from Channel.types import ChannelKind  # noqa: E402
 
 write_lock = threading.Lock()
 permission_replies: dict[str, "queue.Queue[bool]"] = {}
@@ -90,18 +94,44 @@ def patch_permissions() -> None:
     MainLoop.permissions.ask_user = web_ask_user
 
 
+def patch_web_channel() -> None:
+    def send_to_web(response) -> None:
+        if response.text:
+            emit({"type": "output", "role": "assistant", "content": response.text})
+        elif response.error:
+            emit({"type": "output", "role": "error", "content": response.error})
+
+    MainLoop.channel_registry.register(
+        CallbackChannel(
+            channel_id="web",
+            kind=ChannelKind.WEB,
+            trust_level=TrustLevel.HIGH,
+            sender=send_to_web,
+        )
+    )
+
+
 def run_agent(content: str) -> None:
     emit({"type": "status", "status": "busy"})
     capture = Capture("log")
     try:
         with contextlib.redirect_stdout(capture), contextlib.redirect_stderr(capture):
-            MainLoop.hooks.trigger("UserPromptSubmit", content)
-            result = MainLoop.get_runtime().run("web", content)
+            response = MainLoop.handle_channel_message(
+                ChannelMessage(
+                    channel_id="web",
+                    user_id="web",
+                    conversation_id="web",
+                    text=content,
+                    kind=ChannelKind.WEB,
+                    trust_level=TrustLevel.HIGH,
+                ),
+                deliver=False,
+            )
         capture.flush()
-        if result.output:
-            emit({"type": "output", "role": "assistant", "content": result.output})
-        elif result.error:
-            emit({"type": "output", "role": "error", "content": result.error})
+        if response.text:
+            emit({"type": "output", "role": "assistant", "content": response.text})
+        elif response.error:
+            emit({"type": "output", "role": "error", "content": response.error})
     except Exception:
         capture.flush()
         emit({"type": "output", "role": "error", "content": traceback.format_exc()})
@@ -111,6 +141,15 @@ def run_agent(content: str) -> None:
 
 def handle_message(message: dict) -> None:
     msg_type = message.get("type")
+    if msg_type == "channels_list":
+        emit(
+            {
+                "type": "channels",
+                "channels": MainLoop.channel_registry.list_channels(),
+            }
+        )
+        return
+
     if msg_type == "send":
         content = str(message.get("content") or "").strip()
         if content:
@@ -129,6 +168,7 @@ def handle_message(message: dict) -> None:
 
 def main() -> None:
     patch_permissions()
+    patch_web_channel()
     emit({"type": "ready", "model": MainLoop.MODEL})
     emit({"type": "status", "status": "ready"})
 

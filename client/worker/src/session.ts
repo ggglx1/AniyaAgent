@@ -15,7 +15,7 @@ function parseDevice(request: Request): 'desktop' | 'web' | '' {
   return device === 'desktop' || device === 'web' ? device : '';
 }
 
-export class HappyClaudeSession extends DurableObject {
+export class AniyaAgentSession extends DurableObject {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname !== '/ws') return new Response('Not Found', { status: 404 });

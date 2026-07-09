@@ -102,14 +102,14 @@ class SystemPrompt(Prompt):
     def identity_section(self, context: dict) -> str:
         if context.get("agent_role") == "subagent":
             return (
-                "You are a HappyClaude subagent. "
+                "You are an AniyaAgent subagent. "
                 "You receive a fresh conversation containing only the delegated task. "
                 "Complete only that task, use tools when needed, then return a concise final summary. "
                 "Do not delegate further."
             )
 
         return (
-            "You are HappyClaude, a local coding agent. "
+            "You are AniyaAgent, a local coding agent. "
             "Use tools to solve tasks. Act, don't explain unless the user asks for explanation."
         )
 

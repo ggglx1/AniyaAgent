@@ -10,6 +10,7 @@ __pycache__/
 .coverage
 htmlcov/
 *.log
+Test/
 .idea/
 .memory/
 .transcripts/

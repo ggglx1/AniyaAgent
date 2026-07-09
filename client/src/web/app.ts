@@ -1,9 +1,15 @@
 type WsMessage =
   | { type: 'connection.ready'; data: { clientId: string } }
-  | { type: 'connection.devices'; data: { devices: { desktop?: string; web?: string } } }
   | { type: 'agent.status'; data: { status: string } }
   | { type: 'agent.output'; data: { role: 'assistant' | 'log' | 'error'; content: string } }
-  | { type: 'agent.permission'; data: { requestId: string; tool: string; reason: string; input: unknown } };
+  | { type: 'agent.permission'; data: { requestId: string; tool: string; reason: string; input: unknown } }
+  | { type: 'channels.list'; data: { channels: ChannelInfo[] } };
+
+type ChannelInfo = {
+  channel_id: string;
+  kind: string;
+  trust_level: string;
+};
 
 const messages = document.querySelector<HTMLDivElement>('#messages')!;
 const form = document.querySelector<HTMLFormElement>('#composer')!;
@@ -16,6 +22,8 @@ const permissionReason = document.querySelector<HTMLParagraphElement>('#permissi
 const permissionInput = document.querySelector<HTMLPreElement>('#permission-input')!;
 const allowButton = document.querySelector<HTMLButtonElement>('#allow')!;
 const denyButton = document.querySelector<HTMLButtonElement>('#deny')!;
+const channelsEl = document.querySelector<HTMLDivElement>('#channels')!;
+const refreshChannelsButton = document.querySelector<HTMLButtonElement>('#refresh-channels')!;
 
 let ws: WebSocket | null = null;
 let pendingPermissionId = '';
@@ -27,36 +35,32 @@ function connect(): void {
 
   ws.onopen = () => {
     setStatus('已连接', 'connected');
+    requestChannels();
   };
 
   ws.onmessage = (event) => {
     let message: WsMessage;
     try {
-      message = JSON.parse(event.data);
+      message = JSON.parse(event.data) as WsMessage;
     } catch {
       addMessage('log', String(event.data));
       return;
     }
 
     if (message.type === 'agent.status') {
-      setStatus(message.data.status, message.data.status === 'error' ? 'offline' : 'connected');
-      sendButton.disabled = message.data.status === 'busy';
-      return;
-    }
-
-    if (message.type === 'connection.devices') {
-      if (message.data.devices.desktop !== 'connected') {
-        setStatus('等待本机 Agent 上线...', 'pending');
-        sendButton.disabled = true;
-      } else {
-        setStatus('本机 Agent 已连接', 'connected');
-        sendButton.disabled = false;
-      }
+      const status = message.data.status;
+      setStatus(status, status === 'error' || status === 'offline' ? 'offline' : 'connected');
+      sendButton.disabled = status === 'busy' || status.startsWith('starting');
       return;
     }
 
     if (message.type === 'agent.output') {
       addMessage(message.data.role, message.data.content);
+      return;
+    }
+
+    if (message.type === 'channels.list') {
+      renderChannels(message.data.channels);
       return;
     }
 
@@ -98,6 +102,37 @@ function send(payload: unknown): void {
   ws.send(JSON.stringify(payload));
 }
 
+function requestChannels(): void {
+  send({ type: 'channels.list' });
+}
+
+function renderChannels(channels: ChannelInfo[]): void {
+  channelsEl.textContent = '';
+  if (!channels.length) {
+    channelsEl.textContent = '暂无已注册通道';
+    return;
+  }
+  for (const channel of channels) {
+    const item = document.createElement('div');
+    item.className = `channel-card trust-${channel.trust_level}`;
+    item.innerHTML = `
+      <strong>${escapeHtml(channel.channel_id)}</strong>
+      <span>${escapeHtml(channel.kind)} / ${escapeHtml(channel.trust_level)}</span>
+    `;
+    channelsEl.appendChild(item);
+  }
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  }[char] || char));
+}
+
 form.addEventListener('submit', (event) => {
   event.preventDefault();
   const content = input.value.trim();
@@ -118,6 +153,7 @@ input.addEventListener('keydown', (event) => {
 
 allowButton.addEventListener('click', () => answerPermission(true));
 denyButton.addEventListener('click', () => answerPermission(false));
+refreshChannelsButton.addEventListener('click', requestChannels);
 
 function answerPermission(allow: boolean): void {
   if (!pendingPermissionId) return;
@@ -131,5 +167,5 @@ function resizeInput(): void {
   input.style.height = `${Math.min(input.scrollHeight, 160)}px`;
 }
 
-addMessage('log', '打开的是本机 HappyClaude 客户端。手机和电脑在同一网络时，访问控制台打印的局域网地址。');
+addMessage('log', 'Web UI 已接入 AniyaAgent WebChannel 链路。');
 connect();

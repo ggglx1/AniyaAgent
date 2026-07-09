@@ -1,6 +1,6 @@
-# HappyClaude
+# AniyaAgent
 
-HappyClaude is a personal local Agent project for coding, task orchestration, and remote operation from a mobile browser.
+AniyaAgent is a personal local Agent project for coding, task orchestration, and remote operation from a mobile browser.
 
 It runs the Agent runtime on your own computer, supports local tool execution, persistent tasks, memory, background jobs, multi-agent collaboration, Git worktree isolation, and optional LangGraph workflow execution. A lightweight TypeScript client lets you operate the local Agent from a phone through LAN access or a Cloudflare Worker relay.
 
@@ -18,7 +18,7 @@ It runs the Agent runtime on your own computer, supports local tool execution, p
 
 ```text
 Phone Browser / CLI
-  -> HappyClaude Client
+  -> AniyaAgent Client
   -> Python Bridge
   -> Agent Runtime
   -> LLM API + Local Tools
@@ -27,7 +27,7 @@ Phone Browser / CLI
 Remote mode:
 
 ```text
-Phone Browser -> Cloudflare Worker Relay <- Local HappyClaude Client -> Python Agent
+Phone Browser -> Cloudflare Worker Relay <- Local AniyaAgent Client -> Python Agent
 ```
 
 ## Quick Start
@@ -35,7 +35,7 @@ Phone Browser -> Cloudflare Worker Relay <- Local HappyClaude Client -> Python A
 Install Python dependencies:
 
 ```powershell
-cd C:\Users\24021\Desktop\java\learnclaudecode\HappyClaude\Main
+cd C:\Users\24021\Desktop\java\learnclaudecode\AniyaAgent\Main
 pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
@@ -65,7 +65,7 @@ python MainLoopLangGraph.py
 Start local web client:
 
 ```powershell
-cd C:\Users\24021\Desktop\java\learnclaudecode\HappyClaude\client
+cd C:\Users\24021\Desktop\java\learnclaudecode\AniyaAgent\client
 npm install
 npm run build
 npm start
@@ -80,8 +80,8 @@ http://192.168.x.x:9527
 For remote access, deploy the Worker under `client/worker`, then start the local client with:
 
 ```powershell
-$env:HAPPYCLAUDE_WORKER_URL="https://your-worker.workers.dev"
-$env:HAPPYCLAUDE_SESSION_ID="replace-with-a-long-random-session"
+$env:ANIYAAGENT_WORKER_URL="https://your-worker.workers.dev"
+$env:ANIYAAGENT_SESSION_ID="replace-with-a-long-random-session"
 npm start
 ```
 

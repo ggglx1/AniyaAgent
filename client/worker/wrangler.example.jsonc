@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "happyclaude-client",
+  "name": "aniyaagent-client",
   "main": "src/index.ts",
   "compatibility_date": "2026-06-18",
   "assets": {
@@ -10,15 +10,15 @@
   "durable_objects": {
     "bindings": [
       {
-        "name": "HAPPYCLAUDE_SESSION",
-        "class_name": "HappyClaudeSession"
+        "name": "ANIYAAGENT_SESSION",
+        "class_name": "AniyaAgentSession"
       }
     ]
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["HappyClaudeSession"]
+      "new_sqlite_classes": ["AniyaAgentSession"]
     }
   ]
 }

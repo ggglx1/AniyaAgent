@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import copy
+import threading
+import time
 from pathlib import Path
 
 from AgentTeams import AgentTeams
@@ -24,6 +26,16 @@ from TaskSystem import TaskSystem
 from Tools import Tools
 from WorktreeManager import WorktreeManager
 
+ROOT_DIR = Path(__file__).resolve().parent.parent
+CHANNEL_DIR = ROOT_DIR / "Channel"
+import sys
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from Channel import ChannelMessage, ChannelRegistry, ChannelRuntime, TrustLevel  # noqa: E402
+from Channel.local import MemoryChannel, StdoutChannel  # noqa: E402
+from Channel.types import ChannelKind  # noqa: E402
+
 
 SETTINGS = ensure_configured()
 MODEL = SETTINGS.model
@@ -45,6 +57,12 @@ worktree_manager = WorktreeManager(WORKDIR, task_system)
 background_tasks = BackgroundTasks()
 cron_scheduler = CronScheduler(WORKDIR)
 runtime = None
+channel_registry = ChannelRegistry()
+channel_runtime = None
+cron_delivery_started = False
+channel_registry.register(StdoutChannel("cli", ChannelKind.CLI, TrustLevel.HIGH))
+channel_registry.register(MemoryChannel("web", ChannelKind.WEB, TrustLevel.HIGH))
+channel_registry.register(MemoryChannel("cron", ChannelKind.CRON, TrustLevel.MEDIUM))
 
 
 def teammate_tools_factory(name: str) -> Tools:
@@ -76,9 +94,20 @@ prompt_builder: Prompt = SystemPrompt(WORKDIR, skills, memory)
 MAX_REACTIVE_RETRIES = 3
 
 
-def build_system() -> str:
+TODO_REMINDER = (
+    "If the current task is multi-step and the todo list has not been updated recently, "
+    "consider calling todo_write before continuing. Do not interrupt a final answer after "
+    "tool results just to update todos."
+)
+
+
+def build_system(runtime_reminders: list[str] | None = None) -> str:
     context = prompt_builder.parent_context(tools.definitions)
-    return prompt_builder.get_system_prompt(context)
+    system = prompt_builder.get_system_prompt(context)
+    if runtime_reminders:
+        reminders = "\n".join(f"- {reminder}" for reminder in runtime_reminders)
+        system = f"{system}\n\n<runtime_reminders>\n{reminders}\n</runtime_reminders>"
+    return system
 
 
 def build_subagent_system(sub_tools: Tools) -> str:
@@ -113,6 +142,32 @@ def build_request_messages(messages: list, memories_content: str, memory_turn: i
     return request_messages
 
 
+def message_has_tool_result(message: dict | None) -> bool:
+    if not message or message.get("role") != "user":
+        return False
+    content = message.get("content")
+    if not isinstance(content, list):
+        return False
+    return any(isinstance(block, dict) and block.get("type") == "tool_result" for block in content)
+
+
+def todo_runtime_reminders(messages: list) -> list[str]:
+    if rounds_without_todo < 3:
+        return []
+    if message_has_tool_result(messages[-1] if messages else None):
+        return []
+    return [TODO_REMINDER]
+
+
+def notification_blocks_to_reminders(notifications: list[dict]) -> list[str]:
+    reminders = []
+    for block in notifications:
+        text = block.get("text") if isinstance(block, dict) else str(block)
+        if text:
+            reminders.append(str(text))
+    return reminders
+
+
 def collect_system_notifications() -> list[dict]:
     notifications = []
     for text in background_tasks.collect_notifications():
@@ -132,10 +187,33 @@ def inject_cron_jobs(messages: list) -> None:
         )
 
 
-def inject_system_notifications(messages: list) -> None:
-    notifications = collect_system_notifications()
-    if notifications:
-        messages.append({"role": "user", "content": notifications})
+def cron_delivery_loop() -> None:
+    while True:
+        time.sleep(1)
+        for job in cron_scheduler.consume_queue():
+            handle_channel_message(
+                ChannelMessage(
+                    channel_id=job.target_channel,
+                    user_id=job.user_id,
+                    conversation_id=job.conversation_id,
+                    text=f"[Scheduled cron {job.id}]\n{job.prompt}",
+                    kind=ChannelKind.CRON,
+                    trust_level=TrustLevel.MEDIUM,
+                    metadata={
+                        "cron_id": job.id,
+                        "cron": job.cron,
+                        "recurring": job.recurring,
+                    },
+                )
+            )
+
+
+def start_cron_delivery_loop() -> None:
+    global cron_delivery_started
+    if cron_delivery_started:
+        return
+    cron_delivery_started = True
+    threading.Thread(target=cron_delivery_loop, daemon=True, name="cron-channel-delivery").start()
 
 
 def run_tool_turn(
@@ -286,9 +364,7 @@ def run_tool_turn(
                 }
             )
 
-    user_content = collect_system_notifications()
-    user_content.extend(results)
-    messages.append({"role": "user", "content": user_content})
+    messages.append({"role": "user", "content": results})
     return True, used_tools
 
 
@@ -366,8 +442,7 @@ def agent_loop(messages: list) -> None:
             return
 
         RuntimeContext.begin_turn(messages)
-        inject_cron_jobs(messages)
-        inject_system_notifications(messages)
+        runtime_system_notifications = collect_system_notifications()
         pre_compact = copy.deepcopy(messages)
         messages[:] = compactor.preprocess(messages)
 
@@ -375,15 +450,9 @@ def agent_loop(messages: list) -> None:
             print("[auto compact]")
             messages[:] = compactor.compact_history(messages)
 
-        if rounds_without_todo >= 3:
-            messages.append({
-                "role": "user",
-                "content": (
-                    "Reminder: You have not updated the todo list recently. "
-                    "If this is a multi-step task, call todo_write to update "
-                    "the plan and current progress before continuing."
-                ),
-            })
+        runtime_reminders = notification_blocks_to_reminders(runtime_system_notifications)
+        runtime_reminders.extend(todo_runtime_reminders(messages))
+        if runtime_reminders:
             rounds_without_todo = 0
 
         request_messages = build_request_messages(messages, memories_content, memory_turn)
@@ -391,7 +460,7 @@ def agent_loop(messages: list) -> None:
             needs_more_tools, used_tools = run_tool_turn(
                 messages,
                 tools,
-                build_system(),
+                build_system(runtime_reminders),
                 "parent",
                 request_messages=request_messages,
                 active_compactor=compactor,
@@ -471,8 +540,23 @@ def get_runtime() -> AgentRuntime:
     return runtime
 
 
+def get_channel_runtime() -> ChannelRuntime:
+    global channel_runtime
+    if channel_runtime is None:
+        channel_runtime = ChannelRuntime(get_runtime(), channel_registry)
+    return channel_runtime
+
+
+def handle_channel_message(message: ChannelMessage, deliver: bool = True, event_callback=None):
+    hooks.trigger("UserPromptSubmit", message.text)
+    return get_channel_runtime().handle_message(message, deliver=deliver, event_callback=event_callback)
+
+
+start_cron_delivery_loop()
+
+
 if __name__ == "__main__":
-    print("HappyClaude: Agent Loop")
+    print("AniyaAgent: Agent Loop")
     print(f"Model: {get_settings().model}")
     print("Type a task and press Enter. Type q to quit.\n")
 
@@ -486,10 +570,14 @@ if __name__ == "__main__":
         if query.strip().lower() in {"q", "exit", "quit", ""}:
             break
 
-        hooks.trigger("UserPromptSubmit", query)
-        result = get_runtime().run("cli", query)
-        if result.output:
-            print(result.output)
-        elif result.error:
-            print(result.error)
+        handle_channel_message(
+            ChannelMessage(
+                channel_id="cli",
+                user_id="local",
+                conversation_id="cli",
+                text=query,
+                kind=ChannelKind.CLI,
+                trust_level=TrustLevel.HIGH,
+            )
+        )
         print()
