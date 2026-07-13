@@ -3,43 +3,126 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <title>AniyaAgent</title>
+  <meta name="theme-color" content="#f5f8f9" />
+  <title>Aniya</title>
+  <link rel="icon" type="image/jpeg" href="/assets/aniya-logo.jpg" />
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
-  <main class="shell">
-    <header class="topbar">
-      <div>
-        <h1>AniyaAgent</h1>
-        <p id="status">连接中...</p>
+  <div class="app-shell">
+    <header class="global-nav">
+      <div class="nav-inner">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">
+            <img src="/assets/aniya-logo.jpg" alt="" />
+          </div>
+          <div class="brand-copy">
+            <strong>Aniya</strong>
+            <span>私人助理</span>
+          </div>
+        </div>
+
+        <div class="nav-actions">
+          <div id="status-badge" class="status-badge pending">
+            <span id="dot" class="dot" aria-hidden="true"></span>
+            <span id="status">正在醒来</span>
+          </div>
+
+          <button id="channels-toggle" class="menu-button" type="button" title="连接与状态" aria-label="连接与状态" aria-expanded="false" aria-controls="channels-popover">
+            <span aria-hidden="true">•••</span>
+          </button>
+
+          <section id="channels-popover" class="channel-popover hidden" aria-labelledby="channels-title">
+            <div class="popover-head">
+              <div>
+                <h2 id="channels-title">连接状态</h2>
+                <p id="channels-count">正在检查连接</p>
+              </div>
+              <button id="refresh-channels" class="icon-button" type="button" title="刷新连接" aria-label="刷新连接">
+                <span aria-hidden="true">↻</span>
+              </button>
+            </div>
+            <div id="channels" class="channels" aria-live="polite">
+              <div class="channel-skeleton"></div>
+              <div class="channel-skeleton"></div>
+            </div>
+            <div class="popover-foot">
+              <span class="footer-dot" aria-hidden="true"></span>
+              <span>安全地运行在你的设备上</span>
+            </div>
+          </section>
+        </div>
       </div>
-      <span id="dot" class="dot"></span>
     </header>
 
-    <section class="channels-panel">
-      <div class="panel-title">
-        <span>Channels</span>
-        <button id="refresh-channels" type="button">Refresh</button>
+    <main class="workspace">
+      <section id="messages" class="messages" aria-live="polite" aria-label="和 Aniya 的对话">
+        <div id="empty-state" class="empty-state">
+          <div class="presence-stage" aria-hidden="true">
+            <div class="signal-track signal-track-left"><i></i><i></i><i></i></div>
+            <div class="presence">
+              <div class="presence-mark">
+                <img src="/assets/aniya-logo.jpg" alt="" />
+              </div>
+              <div class="presence-wave">
+                <i></i><i></i><i></i><i></i><i></i>
+              </div>
+            </div>
+            <div class="signal-track signal-track-right"><i></i><i></i><i></i></div>
+          </div>
+
+          <div class="companion-meta">
+            <span id="current-time">--:--</span>
+            <span class="meta-separator" aria-hidden="true"></span>
+            <span id="presence-status">正在同步状态</span>
+          </div>
+          <p id="current-date" class="welcome-context">我在这里</p>
+          <h1 id="greeting">晚上好。</h1>
+          <p class="welcome-copy">想聊聊，还是有什么事情想让我替你处理？</p>
+
+        </div>
+      </section>
+
+      <div class="conversation-dock">
+        <div id="activity" class="activity hidden" aria-live="polite">
+          <span class="activity-wave" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span id="activity-text">正在思考</span>
+        </div>
+
+        <button id="conversation-open" class="conversation-open" type="button" title="和 Aniya 说话" aria-label="和 Aniya 说话">
+          <span class="call-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+        </button>
+
+        <form id="composer" class="composer hidden">
+          <div class="composer-box">
+            <div class="composer-avatar" aria-hidden="true">
+              <img src="/assets/aniya-logo.jpg" alt="" />
+            </div>
+            <label class="sr-only" for="input">和 Aniya 说点什么</label>
+            <textarea id="input" rows="1" placeholder="和 Aniya 说点什么…" autocomplete="off"></textarea>
+            <button id="send" class="send-button" type="submit" title="发送消息" aria-label="发送消息">
+              <span aria-hidden="true">↑</span>
+            </button>
+          </div>
+        </form>
       </div>
-      <div id="channels" class="channels"></div>
-    </section>
+    </main>
+  </div>
 
-    <section id="messages" class="messages"></section>
-
-    <form id="composer" class="composer">
-      <textarea id="input" rows="1" placeholder="输入任务，发送到本机 Agent"></textarea>
-      <button id="send" type="submit">发送</button>
-    </form>
-  </main>
-
-  <div id="permission" class="permission hidden">
+  <div id="permission" class="permission hidden" role="dialog" aria-modal="true" aria-labelledby="permission-title">
     <div class="permission-card">
-      <h2>需要授权</h2>
-      <p id="permission-reason"></p>
-      <pre id="permission-input"></pre>
+      <div class="permission-icon" aria-hidden="true">
+        <img src="/assets/aniya-logo.jpg" alt="" />
+      </div>
+      <h2 id="permission-title">这一步需要你的同意</h2>
+      <p id="permission-reason" class="permission-reason"></p>
+      <div class="permission-input-wrap">
+        <span>将要执行的内容</span>
+        <pre id="permission-input"></pre>
+      </div>
       <div class="permission-actions">
-        <button id="deny" type="button">拒绝</button>
-        <button id="allow" type="button">允许</button>
+        <button id="deny" type="button">先不要</button>
+        <button id="allow" type="button">可以</button>
       </div>
     </div>
   </div>

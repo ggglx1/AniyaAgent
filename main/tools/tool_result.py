@@ -73,6 +73,8 @@ class ToolCallValidator:
             return f"Argument {key} must be a string."
         if expected_type == "integer" and not self.is_integer(value):
             return f"Argument {key} must be an integer."
+        if expected_type == "number" and not self.is_number(value):
+            return f"Argument {key} must be a number."
         if expected_type == "array" and not isinstance(value, list):
             return f"Argument {key} must be an array."
         if expected_type == "object" and not isinstance(value, dict):
@@ -101,7 +103,13 @@ class ToolCallValidator:
             for child_key, child_value in value.items():
                 child_schema = properties.get(child_key)
                 if child_schema is None:
-                    return f"Unknown argument: {key}.{child_key}"
+                    additional = schema.get("additionalProperties", False)
+                    if additional is True:
+                        continue
+                    if isinstance(additional, dict):
+                        child_schema = additional
+                    else:
+                        return f"Unknown argument: {key}.{child_key}"
                 error = self.validate_value(f"{key}.{child_key}", child_value, child_schema)
                 if error:
                     return error
@@ -110,3 +118,6 @@ class ToolCallValidator:
 
     def is_integer(self, value) -> bool:
         return isinstance(value, int) and not isinstance(value, bool)
+
+    def is_number(self, value) -> bool:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)

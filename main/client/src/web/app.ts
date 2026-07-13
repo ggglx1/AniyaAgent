@@ -11,30 +11,62 @@ type ChannelInfo = {
   trust_level: string;
 };
 
-const messages = document.querySelector<HTMLDivElement>('#messages')!;
+type MessageRole = 'user' | 'assistant' | 'log' | 'error';
+type ConnectionState = 'pending' | 'connected' | 'busy' | 'offline';
+
+const messages = document.querySelector<HTMLElement>('#messages')!;
 const form = document.querySelector<HTMLFormElement>('#composer')!;
 const input = document.querySelector<HTMLTextAreaElement>('#input')!;
 const sendButton = document.querySelector<HTMLButtonElement>('#send')!;
-const statusEl = document.querySelector<HTMLParagraphElement>('#status')!;
-const dot = document.querySelector<HTMLSpanElement>('#dot')!;
-const permission = document.querySelector<HTMLDivElement>('#permission')!;
-const permissionReason = document.querySelector<HTMLParagraphElement>('#permission-reason')!;
-const permissionInput = document.querySelector<HTMLPreElement>('#permission-input')!;
+const statusEl = document.querySelector<HTMLElement>('#status')!;
+const statusBadge = document.querySelector<HTMLElement>('#status-badge')!;
+const dot = document.querySelector<HTMLElement>('#dot')!;
+const greeting = document.querySelector<HTMLElement>('#greeting')!;
+const currentTime = document.querySelector<HTMLElement>('#current-time')!;
+const currentDate = document.querySelector<HTMLElement>('#current-date')!;
+const presenceStatus = document.querySelector<HTMLElement>('#presence-status')!;
+const activity = document.querySelector<HTMLElement>('#activity')!;
+const activityText = document.querySelector<HTMLElement>('#activity-text')!;
+const conversationOpen = document.querySelector<HTMLButtonElement>('#conversation-open')!;
+const permission = document.querySelector<HTMLElement>('#permission')!;
+const permissionReason = document.querySelector<HTMLElement>('#permission-reason')!;
+const permissionInput = document.querySelector<HTMLElement>('#permission-input')!;
 const allowButton = document.querySelector<HTMLButtonElement>('#allow')!;
 const denyButton = document.querySelector<HTMLButtonElement>('#deny')!;
-const channelsEl = document.querySelector<HTMLDivElement>('#channels')!;
+const channelsEl = document.querySelector<HTMLElement>('#channels')!;
+const channelsCount = document.querySelector<HTMLElement>('#channels-count')!;
+const channelsToggle = document.querySelector<HTMLButtonElement>('#channels-toggle')!;
+const channelsPopover = document.querySelector<HTMLElement>('#channels-popover')!;
 const refreshChannelsButton = document.querySelector<HTMLButtonElement>('#refresh-channels')!;
+
+const roleLabels: Record<MessageRole, string> = {
+  user: '你',
+  assistant: 'Aniya',
+  log: '状态',
+  error: '遇到了一点问题',
+};
+
+const roleMarks: Record<MessageRole, string> = {
+  user: '你',
+  assistant: 'A',
+  log: '··',
+  error: '!',
+};
 
 let ws: WebSocket | null = null;
 let pendingPermissionId = '';
+let reconnectTimer = 0;
+let channelRefreshTimer = 0;
+let activityTimer = 0;
 
 function connect(): void {
+  window.clearTimeout(reconnectTimer);
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   ws = new WebSocket(`${protocol}//${location.host}/ws?device=web`);
-  setStatus('连接中...', 'pending');
+  setStatus('connecting', 'pending');
 
   ws.onopen = () => {
-    setStatus('已连接', 'connected');
+    setStatus('ready', 'connected');
     requestChannels();
   };
 
@@ -43,109 +75,284 @@ function connect(): void {
     try {
       message = JSON.parse(event.data) as WsMessage;
     } catch {
-      addMessage('log', String(event.data));
       return;
     }
 
     if (message.type === 'agent.status') {
       const status = message.data.status;
-      setStatus(status, status === 'error' || status === 'offline' ? 'offline' : 'connected');
-      sendButton.disabled = status === 'busy' || status.startsWith('starting');
+      const isBusy = status === 'busy' || status.startsWith('starting');
+      const isOffline = status === 'error' || status === 'offline';
+      setStatus(status, isOffline ? 'offline' : isBusy ? 'busy' : 'connected');
+      sendButton.disabled = isBusy || isOffline;
+      if (isBusy && activity.classList.contains('hidden')) setActivity('正在为你处理…');
+      if (!isBusy) clearActivity(450);
       return;
     }
 
     if (message.type === 'agent.output') {
-      addMessage(message.data.role, message.data.content);
+      if (message.data.role === 'log') {
+        handleActivityLog(message.data.content);
+      } else {
+        clearActivity();
+        addMessage(message.data.role, message.data.content);
+      }
       return;
     }
 
     if (message.type === 'channels.list') {
+      finishChannelRefresh();
       renderChannels(message.data.channels);
       return;
     }
 
     if (message.type === 'agent.permission') {
       pendingPermissionId = message.data.requestId;
-      permissionReason.textContent = `${message.data.tool}: ${message.data.reason}`;
+      permissionReason.textContent = `${message.data.tool}：${message.data.reason}`;
       permissionInput.textContent = JSON.stringify(message.data.input, null, 2);
       permission.classList.remove('hidden');
+      allowButton.focus();
     }
   };
 
   ws.onclose = () => {
-    setStatus('连接断开，重连中...', 'offline');
+    finishChannelRefresh();
+    clearActivity();
+    setStatus('reconnecting', 'offline');
     sendButton.disabled = true;
-    window.setTimeout(connect, 1500);
+    reconnectTimer = window.setTimeout(connect, 1500);
   };
 
   ws.onerror = () => {
-    setStatus('连接异常', 'offline');
+    setStatus('error', 'offline');
   };
 }
 
-function setStatus(text: string, state: 'pending' | 'connected' | 'offline'): void {
-  statusEl.textContent = text;
-  dot.className = `dot ${state === 'connected' ? 'connected' : state === 'offline' ? 'offline' : ''}`;
+function setStatus(status: string, state: ConnectionState): void {
+  statusEl.textContent = formatStatus(status);
+  statusBadge.className = `status-badge ${state}`;
+  dot.className = `dot ${state === 'connected' || state === 'busy' ? 'connected' : state === 'offline' ? 'offline' : ''}`;
+  if (state === 'busy') presenceStatus.textContent = '正在专注处理';
+  if (state === 'offline') presenceStatus.textContent = '正在等待重新连接';
 }
 
-function addMessage(role: 'user' | 'assistant' | 'log' | 'error', content: string): void {
+function formatStatus(status: string): string {
+  if (status.startsWith('starting')) return '正在醒来';
+  const labels: Record<string, string> = {
+    connecting: '正在醒来',
+    reconnecting: '正在回来',
+    ready: '在你身边',
+    busy: '正在处理',
+    offline: '暂时离开',
+    error: '连接异常',
+    completed: '在你身边',
+  };
+  return labels[status] || status;
+}
+
+function setWelcome(): void {
+  const now = new Date();
+  const hour = now.getHours();
+  if (hour < 5) greeting.textContent = '夜深了，我在。';
+  else if (hour < 11) greeting.textContent = '早上好。';
+  else if (hour < 14) greeting.textContent = '中午好。';
+  else if (hour < 18) greeting.textContent = '下午好。';
+  else greeting.textContent = '晚上好。';
+
+  currentTime.textContent = new Intl.DateTimeFormat('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(now);
+  currentDate.textContent = new Intl.DateTimeFormat('zh-CN', {
+    month: 'long',
+    day: 'numeric',
+    weekday: 'long',
+  }).format(now);
+}
+
+function setActivity(text: string, autoHideMs = 0): void {
+  window.clearTimeout(activityTimer);
+  activityText.textContent = text;
+  activity.classList.remove('hidden');
+  if (autoHideMs > 0) activityTimer = window.setTimeout(() => activity.classList.add('hidden'), autoHideMs);
+}
+
+function clearActivity(delayMs = 0): void {
+  window.clearTimeout(activityTimer);
+  if (delayMs > 0) {
+    activityTimer = window.setTimeout(() => activity.classList.add('hidden'), delayMs);
+  } else {
+    activity.classList.add('hidden');
+  }
+}
+
+function handleActivityLog(content: string): void {
+  const value = content.toLowerCase();
+  if (value.includes('llm request started')) {
+    setActivity('正在理解你的话…');
+  } else if (value.includes('tool started')) {
+    setActivity('正在替你处理…');
+  } else if (value.includes('completed') || value.includes('llm_end')) {
+    setActivity('马上就好…', 1200);
+  } else if (value.includes('starting') || value.includes('webchannel')) {
+    setActivity('正在准备…', 1600);
+  }
+}
+
+function addMessage(role: MessageRole, content: string): void {
   if (!content.trim()) return;
-  const item = document.createElement('div');
+  document.querySelector('#empty-state')?.remove();
+
+  const item = document.createElement('article');
   item.className = `msg ${role}`;
-  item.textContent = content;
+
+  const avatar = document.createElement('div');
+  avatar.className = 'msg-avatar';
+  avatar.setAttribute('aria-hidden', 'true');
+  if (role === 'assistant') {
+    const image = document.createElement('img');
+    image.src = '/assets/aniya-logo.jpg';
+    image.alt = '';
+    avatar.appendChild(image);
+  } else {
+    avatar.textContent = roleMarks[role];
+  }
+
+  const body = document.createElement('div');
+  body.className = 'msg-body';
+
+  const meta = document.createElement('div');
+  meta.className = 'msg-meta';
+
+  const author = document.createElement('strong');
+  author.textContent = roleLabels[role];
+
+  const time = document.createElement('span');
+  time.textContent = new Intl.DateTimeFormat('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(new Date());
+
+  const text = document.createElement('div');
+  text.className = 'msg-content';
+  text.textContent = content;
+
+  meta.append(author, time);
+  body.append(meta, text);
+  item.append(avatar, body);
   messages.appendChild(item);
   messages.scrollTop = messages.scrollHeight;
 }
 
-function send(payload: unknown): void {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+function send(payload: unknown): boolean {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
   ws.send(JSON.stringify(payload));
+  return true;
 }
 
 function requestChannels(): void {
-  send({ type: 'channels.list' });
+  if (!send({ type: 'channels.list' })) return;
+  window.clearTimeout(channelRefreshTimer);
+  refreshChannelsButton.disabled = true;
+  refreshChannelsButton.classList.add('loading');
+  channelRefreshTimer = window.setTimeout(finishChannelRefresh, 5000);
+}
+
+function finishChannelRefresh(): void {
+  window.clearTimeout(channelRefreshTimer);
+  refreshChannelsButton.disabled = false;
+  refreshChannelsButton.classList.remove('loading');
 }
 
 function renderChannels(channels: ChannelInfo[]): void {
-  channelsEl.textContent = '';
+  channelsEl.replaceChildren();
+  channelsCount.textContent = channels.length ? `${channels.length} 个通道连接正常` : '暂无可用连接';
+  presenceStatus.textContent = channels.length ? `${channels.length} 个连接已就绪` : '正在等待连接';
+
   if (!channels.length) {
-    channelsEl.textContent = '暂无已注册通道';
+    const empty = document.createElement('div');
+    empty.className = 'channel-empty';
+    empty.textContent = '暂时没有可用通道';
+    channelsEl.appendChild(empty);
     return;
   }
+
   for (const channel of channels) {
     const item = document.createElement('div');
-    item.className = `channel-card trust-${channel.trust_level}`;
-    item.innerHTML = `
-      <strong>${escapeHtml(channel.channel_id)}</strong>
-      <span>${escapeHtml(channel.kind)} / ${escapeHtml(channel.trust_level)}</span>
-    `;
+    item.className = `channel-item trust-${channel.trust_level}`;
+
+    const icon = document.createElement('div');
+    icon.className = 'channel-icon';
+    icon.setAttribute('aria-hidden', 'true');
+    icon.textContent = channel.kind.slice(0, 2).toUpperCase();
+
+    const copy = document.createElement('div');
+    copy.className = 'channel-copy';
+
+    const name = document.createElement('strong');
+    name.textContent = formatChannelName(channel.channel_id);
+
+    const kind = document.createElement('span');
+    kind.textContent = channel.kind;
+
+    const trust = document.createElement('span');
+    trust.className = 'trust-badge';
+    trust.textContent = formatTrust(channel.trust_level);
+
+    copy.append(name, kind);
+    item.append(icon, copy, trust);
     channelsEl.appendChild(item);
   }
 }
 
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (char) => ({
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    '"': '&quot;',
-    "'": '&#39;',
-  }[char] || char));
+function formatChannelName(channelId: string): string {
+  const labels: Record<string, string> = {
+    cli: '本机',
+    web: '网页对话',
+    cron: '定时任务',
+    weixin: '微信',
+  };
+  return labels[channelId] || channelId;
+}
+
+function formatTrust(level: string): string {
+  const labels: Record<string, string> = {
+    high: '安全',
+    medium: '受限',
+    low: '谨慎',
+  };
+  return labels[level] || level;
+}
+
+function setChannelsOpen(open: boolean): void {
+  channelsPopover.classList.toggle('hidden', !open);
+  channelsToggle.setAttribute('aria-expanded', String(open));
+}
+
+function setComposerOpen(open: boolean): void {
+  form.classList.toggle('hidden', !open);
+  conversationOpen.classList.toggle('hidden', open);
+  if (open) window.requestAnimationFrame(() => input.focus());
 }
 
 form.addEventListener('submit', (event) => {
   event.preventDefault();
   const content = input.value.trim();
-  if (!content) return;
+  if (!content || sendButton.disabled) return;
+  if (!send({ type: 'agent.send', data: { content } })) return;
+
   addMessage('user', content);
-  send({ type: 'agent.send', data: { content } });
   input.value = '';
   resizeInput();
+  setActivity('正在理解你的话…');
+  setStatus('busy', 'busy');
+  sendButton.disabled = true;
 });
 
 input.addEventListener('input', resizeInput);
 input.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter' && !event.shiftKey) {
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
     form.requestSubmit();
   }
@@ -154,12 +361,36 @@ input.addEventListener('keydown', (event) => {
 allowButton.addEventListener('click', () => answerPermission(true));
 denyButton.addEventListener('click', () => answerPermission(false));
 refreshChannelsButton.addEventListener('click', requestChannels);
+conversationOpen.addEventListener('click', () => setComposerOpen(true));
+
+channelsToggle.addEventListener('click', (event) => {
+  event.stopPropagation();
+  setChannelsOpen(channelsPopover.classList.contains('hidden'));
+});
+
+document.addEventListener('click', (event) => {
+  const target = event.target as Node;
+  if (!channelsPopover.classList.contains('hidden') && !document.querySelector('.nav-actions')?.contains(target)) {
+    setChannelsOpen(false);
+  }
+  if (!form.classList.contains('hidden') && !form.contains(target) && !conversationOpen.contains(target)) {
+    setComposerOpen(false);
+  }
+});
+
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  if (!permission.classList.contains('hidden')) answerPermission(false);
+  else if (!channelsPopover.classList.contains('hidden')) setChannelsOpen(false);
+  else if (!form.classList.contains('hidden')) setComposerOpen(false);
+});
 
 function answerPermission(allow: boolean): void {
   if (!pendingPermissionId) return;
   send({ type: 'agent.permission', data: { requestId: pendingPermissionId, allow } });
   pendingPermissionId = '';
   permission.classList.add('hidden');
+  input.focus();
 }
 
 function resizeInput(): void {
@@ -167,5 +398,6 @@ function resizeInput(): void {
   input.style.height = `${Math.min(input.scrollHeight, 160)}px`;
 }
 
-addMessage('log', 'Web UI 已接入 AniyaAgent WebChannel 链路。');
+setWelcome();
+window.setInterval(setWelcome, 30_000);
 connect();

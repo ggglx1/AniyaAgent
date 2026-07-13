@@ -17,6 +17,8 @@ from main.llm.http import client, ensure_configured, get_settings
 from main.llm.gateway import LlmGateway
 from main.agent.loop_guard import LoopGuard
 from main.memory.memory import Memory
+from main.memory import MemoryWorkspaceSync, PersonalMemoryManager, PersonalMemoryRetriever
+from main.assistant import DailyPlanner, Persona, PersonalStateManager, ProfileStore, ReminderDispatcher
 from main.tools.permissions import Permissions
 import main.agent.runtime_context as RuntimeContext
 from main.prompt.skills import Skills
@@ -47,6 +49,13 @@ hooks.register("PreToolUse", permissions.check)
 rounds_without_todo = 0
 skills = Skills(WORKDIR)
 memory = Memory(WORKDIR, llm_gateway, MODEL)
+personal_workspace = MemoryWorkspaceSync(WORKDIR)
+profile_store = ProfileStore(WORKDIR, workspace_sync=personal_workspace)
+personal_memory_manager = PersonalMemoryManager(WORKDIR, workspace_sync=personal_workspace)
+personal_memory_retriever = PersonalMemoryRetriever(personal_memory_manager)
+personal_state = PersonalStateManager(WORKDIR)
+daily_planner = DailyPlanner(WORKDIR, personal_state, profile_store)
+personal_workspace.sync_profile(profile_store.get())
 compactor = ContextCompactor(WORKDIR, llm_gateway, MODEL)
 error_handler: ErrorHandler = DirectErrorHandler()
 error_recovery = ErrorRecovery(MODEL)
@@ -63,6 +72,7 @@ cron_delivery_started = False
 channel_registry.register(StdoutChannel("cli", ChannelKind.CLI, TrustLevel.HIGH))
 channel_registry.register(MemoryChannel("web", ChannelKind.WEB, TrustLevel.HIGH))
 channel_registry.register(MemoryChannel("cron", ChannelKind.CRON, TrustLevel.MEDIUM))
+reminder_dispatcher = ReminderDispatcher(WORKDIR, personal_state, profile_store, channel_registry)
 
 
 def teammate_tools_factory(name: str) -> Tools:
@@ -90,7 +100,14 @@ agent_teams = AgentTeams(
     worktree_manager=worktree_manager,
 )
 cron_scheduler.start()
-prompt_builder: Prompt = SystemPrompt(WORKDIR, skills, memory)
+prompt_builder: Prompt = SystemPrompt(
+    WORKDIR,
+    skills,
+    memory,
+    persona=Persona(),
+    profile=profile_store,
+    personal_state=personal_state,
+)
 MAX_REACTIVE_RETRIES = 3
 
 
@@ -140,6 +157,13 @@ def build_request_messages(messages: list, memories_content: str, memory_turn: i
         "content": f"{memories_content}\n\n{target['content']}",
     }
     return request_messages
+
+
+def latest_user_text(messages: list) -> str:
+    for message in reversed(messages):
+        if message.get("role") == "user" and isinstance(message.get("content"), str):
+            return message["content"]
+    return ""
 
 
 def message_has_tool_result(message: dict | None) -> bool:
@@ -415,6 +439,10 @@ tools = Tools(
     cron_scheduler=cron_scheduler,
     agent_teams=agent_teams,
     worktree_manager=worktree_manager,
+    personal_profile=profile_store,
+    personal_memory=personal_memory_manager,
+    personal_state=personal_state,
+    daily_planner=daily_planner,
 )
 
 
@@ -424,7 +452,11 @@ def agent_loop(messages: list) -> None:
     reactive_retries = 0
     recovery_state = error_recovery.new_state()
     loop_state = loop_guard.new_state()
-    memories_content = memory.load_memories(messages)
+    memory_sections = [
+        memory.load_memories(messages),
+        personal_memory_retriever.context(latest_user_text(messages)),
+    ]
+    memories_content = "\n\n".join(section for section in memory_sections if section)
     memory_turn = len(messages) - 1 if messages and isinstance(messages[-1].get("content"), str) else None
 
     while True:
@@ -553,6 +585,7 @@ def handle_channel_message(message: ChannelMessage, deliver: bool = True, event_
 
 
 start_cron_delivery_loop()
+reminder_dispatcher.start()
 
 
 if __name__ == "__main__":

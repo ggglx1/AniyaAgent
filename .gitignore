@@ -12,6 +12,7 @@ htmlcov/
 *.log
 Test/
 test/
+tests/
 .idea/
 .memory/
 .transcripts/
@@ -21,3 +22,5 @@ test/
 .worktrees/
 .runtime/
 .scheduled_tasks.json
+workspace/
+.personal/

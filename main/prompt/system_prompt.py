@@ -18,10 +18,13 @@ class Prompt(ABC):
 
 
 class SystemPrompt(Prompt):
-    def __init__(self, workdir: Path, skills, memory):
+    def __init__(self, workdir: Path, skills, memory, persona=None, profile=None, personal_state=None):
         self.workdir = workdir.resolve()
         self.skills = skills
         self.memory = memory
+        self.persona = persona
+        self.profile = profile
+        self.personal_state = personal_state
         self.last_context_key = None
         self.last_prompt = None
 
@@ -50,6 +53,11 @@ class SystemPrompt(Prompt):
             "enabled_tools": tool_names,
             "skill_catalog": skill_catalog,
             "memory_index": memory_index,
+            "profile_summary": self.profile.summary() if agent_role == "parent" and self.profile else "",
+            "personal_state_summary": (
+                self.personal_state.context()
+                if agent_role == "parent" and self.personal_state else ""
+            ),
         }
 
     def get_system_prompt(self, context: dict) -> str:
@@ -76,6 +84,14 @@ class SystemPrompt(Prompt):
 
         if "todo_write" in enabled_tools:
             sections.append(self.todo_section())
+        if context.get("agent_role") == "parent" and context.get("profile_summary"):
+            sections.append(self.profile_section(context["profile_summary"]))
+        if context.get("agent_role") == "parent" and "remember_personal_fact" in enabled_tools:
+            sections.append(self.personal_state_section())
+        if context.get("agent_role") == "parent" and context.get("personal_state_summary"):
+            sections.append(self.personal_state_context_section(context["personal_state_summary"]))
+        if context.get("agent_role") == "parent" and "get_today_overview" in enabled_tools:
+            sections.append(self.daily_loop_section())
         if context.get("agent_role") == "parent" and "task" in enabled_tools:
             sections.append(self.subagent_section())
         if context.get("agent_role") == "parent" and "create_task" in enabled_tools:
@@ -108,10 +124,43 @@ class SystemPrompt(Prompt):
                 "Do not delegate further."
             )
 
+        if self.persona is not None:
+            return self.persona.system_section()
+        return "You are Aniya, a reliable personal companion assistant."
+
+    def profile_section(self, profile_summary: str) -> str:
         return (
-            "You are AniyaAgent, a local personal assistant. "
-            "Help the user manage personal tasks, daily workflows, reminders, knowledge, and local actions. "
-            "Use tools to solve tasks. Act, don't explain unless the user asks for explanation."
+            "Approved user profile:\n"
+            f"{profile_summary}\n"
+            "Treat these explicit settings as current. Use get_profile when exact details are needed."
+        )
+
+    def personal_state_section(self) -> str:
+        return (
+            "Personal state and memory:\n"
+            "Use update_profile only for explicit stable profile settings. Use remember_personal_fact "
+            "for durable useful information; inferred memories must use explicit=false and remain pending "
+            "until the user confirms them. Use correct_personal_memory instead of keeping contradictory "
+            "active facts, and forget_personal_memory when asked to forget. Never store tasks, promises, "
+            "deadlines, or reminders as ordinary memory. Use create_personal_task for the user's durable "
+            "commitments and create_reminder for time-based notifications. The existing create_task tool is "
+            "only the engineering Agent Team board. Clearly tell the user when personal state changes."
+        )
+
+    def personal_state_context_section(self, summary: str) -> str:
+        return (
+            f"{summary}\n"
+            "This is approved structured state, not a suggestion. Query the corresponding list/get tools "
+            "before making broad claims when the summary may be truncated."
+        )
+
+    def daily_loop_section(self) -> str:
+        return (
+            "Daily planning and review:\n"
+            "Use get_today_overview for factual questions about today. Use generate_morning_plan for a "
+            "small prioritized plan and generate_evening_review for a factual end-of-day review. These "
+            "outputs are advisory: do not mark tasks complete, reschedule work, or create memories unless "
+            "the user explicitly requests the state change."
         )
 
     def workspace_section(self, context: dict) -> str:

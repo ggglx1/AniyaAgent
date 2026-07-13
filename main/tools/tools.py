@@ -8,6 +8,9 @@ from main.tasks.background_tasks import BackgroundTasks
 from main.tasks.cron_scheduler import CronScheduler
 from main.tasks.task_system import TaskSystem
 from main.tools.tool_result import ToolCallValidator, ToolResult
+from main.tools.personal_tools import build_personal_tools
+from main.tools.personal_state_tools import build_personal_state_tools
+from main.tools.daily_tools import build_daily_tools
 from main.teams.worktree_manager import WorktreeManager
 
 
@@ -1060,6 +1063,10 @@ class Tools:
         agent_teams: AgentTeams | None = None,
         agent_name: str = "lead",
         worktree_manager: WorktreeManager | None = None,
+        personal_profile=None,
+        personal_memory=None,
+        personal_state=None,
+        daily_planner=None,
     ):
         self.workdir = workdir.resolve()
         self.workdir_provider = workdir_provider
@@ -1073,6 +1080,16 @@ class Tools:
         self.register(EditFileTool(self.workdir, self.workdir_provider))
         self.register(GlobTool(self.workdir, self.workdir_provider))
         self.register(self.todo_tool)
+
+        if personal_profile is not None and personal_memory is not None:
+            for personal_tool in build_personal_tools(personal_profile, personal_memory):
+                self.register(personal_tool)
+        if personal_state is not None:
+            for state_tool in build_personal_state_tools(personal_state):
+                self.register(state_tool)
+        if daily_planner is not None:
+            for daily_tool in build_daily_tools(daily_planner):
+                self.register(daily_tool)
 
         if skill_loader is not None:
             self.register(LoadSkillTool(skill_loader))
