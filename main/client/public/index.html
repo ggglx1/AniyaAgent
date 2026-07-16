@@ -32,6 +32,25 @@
             <span aria-hidden="true">•••</span>
           </button>
 
+          <button id="models-toggle" class="model-button" type="button" title="选择模型" aria-label="选择模型" aria-expanded="false" aria-controls="models-popover">
+            <span class="model-button-kicker">模型</span>
+            <span id="active-model" class="model-button-value">加载中</span>
+          </button>
+
+          <section id="models-popover" class="model-popover hidden" aria-labelledby="models-title">
+            <div class="popover-head model-popover-head">
+              <div>
+                <h2 id="models-title">模型</h2>
+                <p id="models-summary">正在读取可用模型</p>
+              </div>
+            </div>
+            <div id="models" class="model-options" aria-live="polite">
+              <div class="model-skeleton"></div>
+              <div class="model-skeleton"></div>
+            </div>
+            <p id="models-feedback" class="model-feedback hidden" role="status"></p>
+          </section>
+
           <section id="channels-popover" class="channel-popover hidden" aria-labelledby="channels-title">
             <div class="popover-head">
               <div>
@@ -96,7 +115,7 @@
         <form id="composer" class="composer hidden">
           <div class="composer-box">
             <div class="composer-avatar" aria-hidden="true">
-              <img src="/assets/aniya-logo.jpg" alt="" />
+              <img src="/assets/aniya-chat-avatar.jpg" alt="" />
             </div>
             <label class="sr-only" for="input">和 Aniya 说点什么</label>
             <textarea id="input" rows="1" placeholder="和 Aniya 说点什么…" autocomplete="off"></textarea>

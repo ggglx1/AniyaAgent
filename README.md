@@ -44,7 +44,7 @@ Edit `main/.env`:
 
 ```env
 ANTHROPIC_API_KEY=your_api_key_here
-MODEL_ID=your_model_id_here
+ANTHROPIC_MODEL_ID=your_model_id_here
 ANTHROPIC_BASE_URL=https://api.anthropic.com
 ```
 
@@ -87,6 +87,8 @@ npm start
 
 ## Configuration
 
+Memory is split into factual Web conversation history, daily summaries, and approved long-term memories. The default `MEMORY_MODE=structured_only` uses no legacy Markdown runtime. `legacy_audit` only reports old Markdown data; `legacy_migration` only permits preview, backup, and confirmed import.
+
 Optional LLM gateway settings:
 
 ```env
@@ -97,6 +99,10 @@ COMPACT_MODEL_ID=your_compact_model
 REPAIR_MODEL_ID=your_repair_model
 MEMORY_MATCH_MODE=keyword
 ```
+
+## Memory API
+
+The WebChannel exposes authenticated memory management endpoints: `GET /memory/messages?date=YYYY-MM-DD`, `GET /memory/daily`, `GET /memory/long-term`, and `GET /memory/export`; use `POST /memory/redact` and `POST /memory/long-term/action` for explicit user-approved changes.
 
 ## Security
 

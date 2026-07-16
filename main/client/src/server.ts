@@ -11,18 +11,35 @@ type ServerMessage =
   | { type: 'agent.status'; data: { status: string } }
   | { type: 'agent.output'; data: { role: 'assistant' | 'log' | 'error'; content: string } }
   | { type: 'agent.permission'; data: PermissionRequest }
-  | { type: 'channels.list'; data: { channels: ChannelInfo[] } };
+  | { type: 'channels.list'; data: { channels: ChannelInfo[] } }
+  | { type: 'models.list'; data: ModelProvidersPayload }
+  | { type: 'models.error'; data: { message: string } };
 
 type ClientMessage =
   | { type: 'agent.send'; data?: { content?: string } }
   | { type: 'agent.permission'; data?: { requestId?: string; allow?: boolean } }
   | { type: 'channels.list'; data?: Record<string, never> }
+  | { type: 'models.list'; data?: Record<string, never> }
+  | { type: 'models.select'; data?: { provider?: string } }
   | { type: 'connection.ping'; data?: Record<string, never> };
 
 type ChannelInfo = {
   channel_id: string;
   kind: string;
   trust_level: string;
+};
+
+type ModelProvider = {
+  name: string;
+  configured: boolean;
+  active: boolean;
+  base_url: string;
+  model: string;
+};
+
+type ModelProvidersPayload = {
+  active: string;
+  providers: ModelProvider[];
 };
 
 type PermissionRequest = {
@@ -56,7 +73,7 @@ const runWebPath = resolve(repoRoot, 'main/channel/run_web.py');
 const port = Number(process.env.ANIYAAGENT_CLIENT_PORT || process.env.PORT || 9527);
 const webChannelPort = Number(process.env.ANIYAAGENT_WEB_CHANNEL_PORT || 9528);
 const webChannelUrl = String(process.env.ANIYAAGENT_WEB_CHANNEL_URL || `http://127.0.0.1:${webChannelPort}`).replace(/\/$/, '');
-const conversationId = String(process.env.ANIYAAGENT_WEB_CONVERSATION_ID || 'web');
+const conversationId = 'personal';
 const defaultCondaPython = resolve(process.env.USERPROFILE || '', 'anaconda3/envs/claude/python.exe');
 const fallbackCondaPython = resolve(process.env.USERPROFILE || '', 'anaconda3/envs/Claude/python.exe');
 const localVenvPython = resolve(repoRoot, 'main/.venv/Scripts/python.exe');
@@ -166,7 +183,7 @@ class WebChannelBridge {
     const submit = await this.postJson('/message', {
       text: content,
       conversation_id: conversationId,
-      user_id: 'web',
+      user_id: 'local',
     });
     const requestId = String(submit.request_id || '');
     if (!requestId) throw new Error(`WebChannel did not return request_id: ${JSON.stringify(submit)}`);
@@ -179,6 +196,28 @@ class WebChannelBridge {
     if (!response.ok) throw new Error(`GET /channels failed: ${response.status}`);
     const payload = await response.json() as { channels?: ChannelInfo[] };
     broadcast({ type: 'channels.list', data: { channels: payload.channels || [] } });
+  }
+
+  async listModels(): Promise<ModelProvidersPayload> {
+    await this.start();
+    const response = await fetch(`${webChannelUrl}/llm/providers`);
+    const payload = await response.json() as { ok?: boolean; error?: string } & Partial<ModelProvidersPayload>;
+    if (!response.ok || payload.ok === false) {
+      throw new Error(String(payload.error || `GET /llm/providers failed: ${response.status}`));
+    }
+    return {
+      active: String(payload.active || ''),
+      providers: Array.isArray(payload.providers) ? payload.providers : [],
+    };
+  }
+
+  async selectModel(provider: string): Promise<ModelProvidersPayload> {
+    await this.start();
+    const payload = await this.postJson('/llm/provider', { provider }) as { active?: unknown; providers?: unknown };
+    return {
+      active: String(payload.active || ''),
+      providers: Array.isArray(payload.providers) ? payload.providers as ModelProvider[] : [],
+    };
   }
 
   async answerPermission(requestId: string, allow: boolean): Promise<void> {
@@ -368,6 +407,13 @@ wss.on('connection', (ws) => {
     }
 
     void handleClientMessage(message).catch((error: unknown) => {
+      if (message.type.startsWith('models.')) {
+        sendJson(ws, {
+          type: 'models.error',
+          data: { message: error instanceof Error ? error.message : String(error) },
+        });
+        return;
+      }
       setStatus('error');
       output('error', error instanceof Error ? error.message : String(error));
     });
@@ -391,6 +437,17 @@ async function handleClientMessage(message: ClientMessage): Promise<void> {
 
   if (message.type === 'channels.list') {
     await bridge.listChannels();
+    return;
+  }
+
+  if (message.type === 'models.list') {
+    broadcast({ type: 'models.list', data: await bridge.listModels() });
+    return;
+  }
+
+  if (message.type === 'models.select') {
+    const provider = String(message.data?.provider || '').trim();
+    if (provider) broadcast({ type: 'models.list', data: await bridge.selectModel(provider) });
     return;
   }
 

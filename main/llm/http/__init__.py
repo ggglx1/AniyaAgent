@@ -1,14 +1,9 @@
 from .client import (
-    ApiAuthError,
-    ApiConfigError,
-    ApiConnectionError,
-    ApiHTTPError,
-    ApiTimeoutError,
-    Block,
-    LLMError,
-    MessageResponse,
+    LLMClient,
     client,
 )
+from .errors import ApiAuthError, ApiConfigError, ApiConnectionError, ApiHTTPError, ApiTimeoutError, LLMError
+from .models import Block, MessageResponse
 from .config import Settings, ensure_configured, get_settings
 
 __all__ = [
@@ -20,6 +15,7 @@ __all__ = [
     "ApiTimeoutError",
     "LLMError",
     "MessageResponse",
+    "LLMClient",
     "Settings",
     "client",
     "ensure_configured",

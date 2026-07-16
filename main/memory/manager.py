@@ -41,6 +41,10 @@ class PersonalMemoryManager:
         metadata: dict | None = None,
         valid_from: str = "",
         valid_until: str = "",
+        privacy_level: str = "normal",
+        retention_policy: str = "permanent",
+        review_at: str = "",
+        origin: str = "explicit_user",
         reason: str = "",
     ) -> MemoryRecord:
         self.validate_type(memory_type)
@@ -62,6 +66,10 @@ class PersonalMemoryManager:
             updated_at=now,
             valid_from=valid_from,
             valid_until=valid_until,
+            privacy_level=privacy_level,
+            retention_policy=retention_policy,
+            review_at=review_at,
+            origin=origin,
             tags=tags or [],
             entity_refs=entity_refs or [],
             metadata=metadata or {},
@@ -164,6 +172,13 @@ class PersonalMemoryManager:
 
     def search(self, query: str, user_id: str = "local", limit: int = 10) -> list[MemoryRecord]:
         return self.repository.search(user_id, query, limit)
+
+    def add_batch(self, candidates: list[dict], user_id: str = "local") -> list[MemoryRecord]:
+        """Controlled entry point used by the extraction pipeline."""
+        created = []
+        for item in candidates:
+            created.append(self.add(user_id=user_id, **item))
+        return created
 
     def list(
         self,

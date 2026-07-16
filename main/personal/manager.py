@@ -15,6 +15,7 @@ from .models import (
 )
 from .repository import PersonalStateRepository
 from .scheduling import CronSchedule
+from main.conversation.repository import ConversationMemoryRepository
 
 
 class PersonalStateManager:
@@ -43,6 +44,7 @@ class PersonalStateManager:
         self.repository = repository or PersonalStateRepository(self.workdir)
         self.workspace_dir = self.workdir / "workspace"
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
+        self.conversation_memory = ConversationMemoryRepository(self.workdir)
 
     def create_task(
         self,
@@ -72,6 +74,7 @@ class PersonalStateManager:
         )
         self.repository.insert("personal_tasks", task, self.activity("task", task.id, "created", None, task))
         self.sync_workspace()
+        self.mark_daily_memory_dirty()
         return task
 
     def update_task(self, task_id: str, changes: dict, source: str = "user") -> PersonalTask:
@@ -94,6 +97,7 @@ class PersonalStateManager:
             self.activity("task", task_id, "updated", before, after, source),
         )
         self.sync_workspace()
+        self.mark_daily_memory_dirty()
         return after
 
     def complete_task(self, task_id: str, note: str = "") -> PersonalTask:
@@ -140,6 +144,7 @@ class PersonalStateManager:
             self.activity("reminder", reminder.id, "created", None, reminder),
         )
         self.sync_workspace()
+        self.mark_daily_memory_dirty()
         return reminder
 
     def update_reminder(self, reminder_id: str, changes: dict, source: str = "user") -> PersonalReminder:
@@ -165,6 +170,7 @@ class PersonalStateManager:
             self.activity("reminder", reminder_id, "updated", before, after, source),
         )
         self.sync_workspace()
+        self.mark_daily_memory_dirty()
         return after
 
     def snooze_reminder(self, reminder_id: str, until: str) -> PersonalReminder:
@@ -354,3 +360,8 @@ class PersonalStateManager:
 
     def new_id(self, prefix: str) -> str:
         return f"{prefix}_{uuid.uuid4().hex[:16]}"
+
+    def mark_daily_memory_dirty(self) -> None:
+        self.conversation_memory.mark_daily_needs_rebuild(
+            datetime.now().astimezone().date().isoformat()
+        )

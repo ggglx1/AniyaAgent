@@ -26,6 +26,11 @@ class MemoryStatus(str, Enum):
 
 class MemorySource(str, Enum):
     CONVERSATION = "conversation"
+    CONVERSATION_EXPLICIT = "conversation_explicit"
+    CONVERSATION_INFERENCE = "conversation_inference"
+    LEGACY_MIGRATION = "legacy_migration"
+    DAILY_CONSOLIDATION = "daily_consolidation"
+    WEEKLY_REFLECTION = "weekly_reflection"
     USER_SETTING = "user_setting"
     TASK_OUTCOME = "task_outcome"
     SYSTEM_REFLECTION = "system_reflection"
@@ -45,6 +50,11 @@ class MemoryRecord:
     created_at: str
     updated_at: str
     last_accessed_at: str = ""
+    privacy_level: str = "normal"
+    retention_policy: str = "permanent"
+    review_at: str = ""
+    origin: str = "explicit_user"
+    retrieval_count: int = 0
     valid_from: str = ""
     valid_until: str = ""
     tags: list[str] = field(default_factory=list)

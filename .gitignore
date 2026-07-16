@@ -15,6 +15,7 @@ test/
 tests/
 .idea/
 .memory/
+.conversation/
 .transcripts/
 .task_outputs/
 .tasks/

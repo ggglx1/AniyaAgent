@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT))
 
 from main.agent import main_loop as MainLoop  # noqa: E402
 from main.channel.web import WebChannel  # noqa: E402
+from main.conversation import MemoryAdminService  # noqa: E402
 
 
 def main() -> None:
@@ -28,6 +29,8 @@ def main() -> None:
         host=args.host,
         port=args.port,
         auth_token=args.token,
+        llm_control=MainLoop.client,
+        memory_admin=MemoryAdminService(MainLoop.conversation_memory, MainLoop.personal_memory_manager),
     )
     MainLoop.channel_registry.register(channel)
     MainLoop.permissions.ask_user = channel.ask_user

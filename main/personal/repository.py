@@ -6,11 +6,11 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 
-from .models import PersonalProject, PersonalReminder, PersonalTask
+from .models import PersonalProject, PersonalReminder, PersonalRoutine, PersonalTask
 
 
 class PersonalStateRepository:
-    schema_version = 1
+    schema_version = 2
 
     def __init__(self, workdir: Path):
         self.workdir = workdir.resolve()
@@ -96,6 +96,22 @@ class PersonalStateRepository:
                 );
                 CREATE INDEX IF NOT EXISTS idx_personal_projects_user_status
                     ON personal_projects(user_id, status);
+                CREATE TABLE IF NOT EXISTS personal_routines (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    routine_type TEXT NOT NULL,
+                    cron TEXT NOT NULL,
+                    timezone TEXT NOT NULL,
+                    target_channel TEXT NOT NULL DEFAULT 'web',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    last_run_at TEXT NOT NULL DEFAULT '',
+                    last_result TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_personal_routines_user_enabled
+                    ON personal_routines(user_id, enabled);
                 CREATE TABLE IF NOT EXISTS personal_activity (
                     id TEXT PRIMARY KEY,
                     user_id TEXT NOT NULL,
@@ -179,6 +195,21 @@ class PersonalStateRepository:
             ).fetchall()
         return [self.decode_record(PersonalReminder, row) for row in rows]
 
+    def list_routines(self, user_id: str, enabled: bool | None = None, limit: int = 100) -> list[PersonalRoutine]:
+        clauses = ["user_id=?"]
+        params: list = [user_id]
+        if enabled is not None:
+            clauses.append("enabled=?")
+            params.append(1 if enabled else 0)
+        params.append(max(1, min(limit, 500)))
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM personal_routines WHERE {' AND '.join(clauses)} "
+                "ORDER BY enabled DESC, updated_at DESC LIMIT ?",
+                params,
+            ).fetchall()
+        return [self.decode_record(PersonalRoutine, row) for row in rows]
+
     def activity(self, user_id: str, limit: int = 100) -> list[dict]:
         with self.connect() as connection:
             rows = connection.execute(
@@ -208,6 +239,8 @@ class PersonalStateRepository:
             json_field = f"{field}_json"
             if json_field in data:
                 data[field] = json.loads(data.pop(json_field) or "[]")
+        if record_type is PersonalRoutine and "enabled" in data:
+            data["enabled"] = bool(data["enabled"])
         return record_type(**data)
 
     def insert_activity(self, connection, activity: dict) -> None:

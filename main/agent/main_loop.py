@@ -16,9 +16,30 @@ from main.tools.hooks import Hooks
 from main.llm.http import client, ensure_configured, get_settings
 from main.llm.gateway import LlmGateway
 from main.agent.loop_guard import LoopGuard
-from main.memory.memory import Memory
-from main.memory import MemoryWorkspaceSync, PersonalMemoryManager, PersonalMemoryRetriever
-from main.assistant import DailyPlanner, Persona, PersonalStateManager, ProfileStore, ReminderDispatcher
+from main.memory import (
+    MemoryContextAssembler,
+    MemoryConsolidator,
+    MemoryMaintenanceService,
+    MemoryMode,
+    MemoryRuntimeConfig,
+    MemoryWorkspaceSync,
+    PersonalMemoryManager,
+    PersonalMemoryRetriever,
+    StructuredMemoryPipeline,
+    LegacyMemoryMigration,
+    LegacyMemoryAudit,
+    ControlledLlmMemoryExtractor,
+)
+from main.conversation import ConversationMemoryRepository, ConversationMemoryService
+from main.assistant import (
+    DailyPlanner,
+    Persona,
+    PersonalStateManager,
+    ProfileStore,
+    ReminderDispatcher,
+    RoutineDispatcher,
+)
+from main.personal import RoutineManager
 from main.tools.permissions import Permissions
 import main.agent.runtime_context as RuntimeContext
 from main.prompt.skills import Skills
@@ -48,13 +69,29 @@ hooks = Hooks()
 hooks.register("PreToolUse", permissions.check)
 rounds_without_todo = 0
 skills = Skills(WORKDIR)
-memory = Memory(WORKDIR, llm_gateway, MODEL)
+memory_config = MemoryRuntimeConfig.from_env()
+# Legacy Markdown memory is deliberately never initialized by the normal runtime.
+memory = None
 personal_workspace = MemoryWorkspaceSync(WORKDIR)
 profile_store = ProfileStore(WORKDIR, workspace_sync=personal_workspace)
 personal_memory_manager = PersonalMemoryManager(WORKDIR, workspace_sync=personal_workspace)
 personal_memory_retriever = PersonalMemoryRetriever(personal_memory_manager)
+conversation_memory = ConversationMemoryService(ConversationMemoryRepository(WORKDIR))
+memory_context = MemoryContextAssembler(conversation_memory, personal_memory_retriever)
 personal_state = PersonalStateManager(WORKDIR)
+conversation_memory.personal_state = personal_state
+memory_pipeline = StructuredMemoryPipeline(
+    personal_memory_manager, conversation_memory, profile_store, personal_state,
+    ControlledLlmMemoryExtractor(client, MODEL),
+)
 daily_planner = DailyPlanner(WORKDIR, personal_state, profile_store)
+memory_consolidator = MemoryConsolidator(conversation_memory, personal_memory_manager)
+memory_maintenance = MemoryMaintenanceService(
+    WORKDIR, conversation_memory, memory_consolidator, daily_planner, profile_store,
+)
+legacy_memory_migration = LegacyMemoryMigration(WORKDIR, personal_memory_manager)
+legacy_memory_audit = LegacyMemoryAudit(WORKDIR)
+routine_manager = RoutineManager(WORKDIR)
 personal_workspace.sync_profile(profile_store.get())
 compactor = ContextCompactor(WORKDIR, llm_gateway, MODEL)
 error_handler: ErrorHandler = DirectErrorHandler()
@@ -73,6 +110,13 @@ channel_registry.register(StdoutChannel("cli", ChannelKind.CLI, TrustLevel.HIGH)
 channel_registry.register(MemoryChannel("web", ChannelKind.WEB, TrustLevel.HIGH))
 channel_registry.register(MemoryChannel("cron", ChannelKind.CRON, TrustLevel.MEDIUM))
 reminder_dispatcher = ReminderDispatcher(WORKDIR, personal_state, profile_store, channel_registry)
+routine_dispatcher = RoutineDispatcher(
+    WORKDIR,
+    routine_manager,
+    daily_planner,
+    profile_store,
+    channel_registry,
+)
 
 
 def teammate_tools_factory(name: str) -> Tools:
@@ -103,7 +147,7 @@ cron_scheduler.start()
 prompt_builder: Prompt = SystemPrompt(
     WORKDIR,
     skills,
-    memory,
+    None,
     persona=Persona(),
     profile=profile_store,
     personal_state=personal_state,
@@ -443,6 +487,10 @@ tools = Tools(
     personal_memory=personal_memory_manager,
     personal_state=personal_state,
     daily_planner=daily_planner,
+    routine_manager=routine_manager,
+    routine_dispatcher=routine_dispatcher,
+    conversation_memory=conversation_memory,
+    legacy_memory_migration=legacy_memory_migration if memory_config.allow_legacy_migration else None,
 )
 
 
@@ -452,11 +500,10 @@ def agent_loop(messages: list) -> None:
     reactive_retries = 0
     recovery_state = error_recovery.new_state()
     loop_state = loop_guard.new_state()
-    memory_sections = [
-        memory.load_memories(messages),
-        personal_memory_retriever.context(latest_user_text(messages)),
-    ]
-    memories_content = "\n\n".join(section for section in memory_sections if section)
+    if memory_config.audit_legacy:
+        audit = legacy_memory_audit.report()
+        RuntimeContext.event("memory.legacy_audit", {"file_count": audit["file_count"], "estimated_prompt_tokens": audit["estimated_prompt_tokens"]})
+    memories_content = memory_context.assemble(latest_user_text(messages))
     memory_turn = len(messages) - 1 if messages and isinstance(messages[-1].get("content"), str) else None
 
     while True:
@@ -517,8 +564,6 @@ def agent_loop(messages: list) -> None:
 
         if not needs_more_tools:
             hooks.trigger("Stop", messages)
-            memory.extract_memories(pre_compact)
-            memory.consolidate_memories()
             loop_guard.reset(loop_state)
             return
 
@@ -568,7 +613,12 @@ def print_final_text(message_content) -> None:
 def get_runtime() -> AgentRuntime:
     global runtime
     if runtime is None:
-        runtime = AgentRuntime(WORKDIR, agent_loop, extract_text)
+        runtime = AgentRuntime(
+            WORKDIR, agent_loop, extract_text, conversation_memory=conversation_memory,
+            profile_store=profile_store, memory_pipeline=memory_pipeline,
+            memory_maintenance=memory_maintenance,
+            memory_source_provider=lambda: memory_context.last_sources,
+        )
     return runtime
 
 
@@ -586,6 +636,8 @@ def handle_channel_message(message: ChannelMessage, deliver: bool = True, event_
 
 start_cron_delivery_loop()
 reminder_dispatcher.start()
+routine_dispatcher.start()
+memory_maintenance.start()
 
 
 if __name__ == "__main__":

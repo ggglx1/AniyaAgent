@@ -16,9 +16,18 @@ from main.tools.hooks import Hooks
 from main.llm.http import client, ensure_configured, get_settings
 from main.llm.gateway import LlmGateway
 from main.agent.loop_guard import LoopGuard
-from main.memory.memory import Memory
-from main.memory import MemoryWorkspaceSync, PersonalMemoryManager, PersonalMemoryRetriever
+from main.memory import (
+    MemoryContextAssembler,
+    MemoryMode,
+    MemoryRuntimeConfig,
+    MemoryWorkspaceSync,
+    PersonalMemoryManager,
+    PersonalMemoryRetriever,
+    LegacyMemoryMigration,
+)
+from main.conversation import ConversationMemoryRepository, ConversationMemoryService
 from main.assistant import DailyPlanner, Persona, PersonalStateManager, ProfileStore
+from main.personal import RoutineManager
 from main.tools.permissions import Permissions
 from main.prompt.skills import Skills
 from main.llm.structured_output import ModelOutputValidator
@@ -45,13 +54,19 @@ hooks = Hooks()
 hooks.register("PreToolUse", permissions.check)
 rounds_without_todo = 0
 skills = Skills(WORKDIR)
-memory = Memory(WORKDIR, llm_gateway, MODEL)
+memory_config = MemoryRuntimeConfig.from_env()
+memory = None
 personal_workspace = MemoryWorkspaceSync(WORKDIR)
 profile_store = ProfileStore(WORKDIR, workspace_sync=personal_workspace)
 personal_memory_manager = PersonalMemoryManager(WORKDIR, workspace_sync=personal_workspace)
 personal_memory_retriever = PersonalMemoryRetriever(personal_memory_manager)
+conversation_memory = ConversationMemoryService(ConversationMemoryRepository(WORKDIR))
+memory_context = MemoryContextAssembler(conversation_memory, personal_memory_retriever)
+legacy_memory_migration = LegacyMemoryMigration(WORKDIR, personal_memory_manager)
 personal_state = PersonalStateManager(WORKDIR)
+conversation_memory.personal_state = personal_state
 daily_planner = DailyPlanner(WORKDIR, personal_state, profile_store)
+routine_manager = RoutineManager(WORKDIR)
 personal_workspace.sync_profile(profile_store.get())
 compactor = ContextCompactor(WORKDIR, llm_gateway, MODEL)
 error_handler: ErrorHandler = DirectErrorHandler()
@@ -92,7 +107,7 @@ cron_scheduler.start()
 prompt_builder: Prompt = SystemPrompt(
     WORKDIR,
     skills,
-    memory,
+    None,
     persona=Persona(),
     profile=profile_store,
     personal_state=personal_state,
@@ -112,6 +127,9 @@ tools = Tools(
     personal_memory=personal_memory_manager,
     personal_state=personal_state,
     daily_planner=daily_planner,
+    routine_manager=routine_manager,
+    conversation_memory=conversation_memory,
+    legacy_memory_migration=legacy_memory_migration if memory_config.allow_legacy_migration else None,
 )
 
 
@@ -321,11 +339,7 @@ def model_and_tool_node(state: AgentState) -> AgentState:
     global rounds_without_todo
 
     messages = state["messages"]
-    memory_sections = [
-        memory.load_memories(messages),
-        personal_memory_retriever.context(latest_user_text(messages)),
-    ]
-    memories_content = "\n\n".join(section for section in memory_sections if section)
+    memories_content = memory_context.assemble(latest_user_text(messages))
     memory_turn = len(messages) - 1 if messages and isinstance(messages[-1].get("content"), str) else None
     request_messages = build_request_messages(messages, memories_content, memory_turn)
 
@@ -351,8 +365,6 @@ def model_and_tool_node(state: AgentState) -> AgentState:
     state["should_stop"] = not needs_more_tools
     if state["should_stop"]:
         hooks.trigger("Stop", messages)
-        memory.extract_memories(state.get("_pre_compact", messages))
-        memory.consolidate_memories()
         loop_guard.reset(loop_guard.new_state())
         return state
 

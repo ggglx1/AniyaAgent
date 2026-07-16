@@ -10,7 +10,7 @@ from .models import MemoryHistoryRecord, MemoryRecord
 
 
 class MemoryRepository:
-    schema_version = 1
+    schema_version = 2
 
     def __init__(self, workdir: Path):
         self.workdir = workdir.resolve()
@@ -55,6 +55,11 @@ class MemoryRepository:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     last_accessed_at TEXT NOT NULL DEFAULT '',
+                    privacy_level TEXT NOT NULL DEFAULT 'normal',
+                    retention_policy TEXT NOT NULL DEFAULT 'permanent',
+                    review_at TEXT NOT NULL DEFAULT '',
+                    origin TEXT NOT NULL DEFAULT 'explicit_user',
+                    retrieval_count INTEGER NOT NULL DEFAULT 0,
                     valid_from TEXT NOT NULL DEFAULT '',
                     valid_until TEXT NOT NULL DEFAULT '',
                     tags_json TEXT NOT NULL DEFAULT '[]',
@@ -66,6 +71,15 @@ class MemoryRepository:
                     ON memories(user_id, status);
                 CREATE INDEX IF NOT EXISTS idx_memories_user_type
                     ON memories(user_id, type);
+                CREATE INDEX IF NOT EXISTS idx_memories_active_rank
+                    ON memories(user_id, status, valid_until, importance DESC, updated_at DESC);
+                CREATE TABLE IF NOT EXISTS memory_ngrams (
+                    memory_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    gram TEXT NOT NULL,
+                    PRIMARY KEY(memory_id, gram)
+                );
+                CREATE INDEX IF NOT EXISTS idx_memory_ngrams_lookup ON memory_ngrams(user_id, gram);
                 CREATE TABLE IF NOT EXISTS memory_history (
                     id TEXT PRIMARY KEY,
                     memory_id TEXT NOT NULL,
@@ -79,6 +93,12 @@ class MemoryRepository:
                     ON memory_history(memory_id, created_at);
                 """
             )
+            self.ensure_column(connection, "memories", "privacy_level", "TEXT NOT NULL DEFAULT 'normal'")
+            self.ensure_column(connection, "memories", "retention_policy", "TEXT NOT NULL DEFAULT 'permanent'")
+            self.ensure_column(connection, "memories", "review_at", "TEXT NOT NULL DEFAULT ''")
+            self.ensure_column(connection, "memories", "origin", "TEXT NOT NULL DEFAULT 'explicit_user'")
+            self.ensure_column(connection, "memories", "retrieval_count", "INTEGER NOT NULL DEFAULT 0")
+            self.rebuild_ngram_index(connection)
             connection.execute(
                 "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('version', ?)",
                 (str(self.schema_version),),
@@ -91,12 +111,14 @@ class MemoryRepository:
                 INSERT INTO memories(
                     id, user_id, content, type, status, source, importance, confidence,
                     created_at, updated_at, last_accessed_at, valid_from, valid_until,
+                    privacy_level, retention_policy, review_at, origin, retrieval_count,
                     tags_json, entity_refs_json, metadata_json, supersedes_memory_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 self.record_values(record),
             )
             self.insert_history(connection, history)
+            self.replace_ngrams(connection, record)
         return record
 
     def get(self, memory_id: str, user_id: str, include_deleted: bool = False) -> MemoryRecord | None:
@@ -161,7 +183,8 @@ class MemoryRepository:
                 """
                 UPDATE memories SET content=?, type=?, status=?, source=?, importance=?, confidence=?,
                     updated_at=?, last_accessed_at=?, valid_from=?, valid_until=?, tags_json=?,
-                    entity_refs_json=?, metadata_json=?, supersedes_memory_id=?
+                    entity_refs_json=?, metadata_json=?, supersedes_memory_id=?, privacy_level=?,
+                    retention_policy=?, review_at=?, origin=?, retrieval_count=?
                 WHERE id=? AND user_id=?
                 """,
                 (
@@ -179,11 +202,17 @@ class MemoryRepository:
                     json.dumps(after.entity_refs, ensure_ascii=False),
                     json.dumps(after.metadata, ensure_ascii=False),
                     after.supersedes_memory_id,
+                    after.privacy_level,
+                    after.retention_policy,
+                    after.review_at,
+                    after.origin,
+                    after.retrieval_count,
                     before.id,
                     before.user_id,
                 ),
             )
             self.insert_history(connection, history)
+            self.replace_ngrams(connection, after)
         return after
 
     def forget(
@@ -207,6 +236,7 @@ class MemoryRepository:
                 (redacted, redacted, before.id),
             )
             self.insert_history(connection, history)
+            connection.execute("DELETE FROM memory_ngrams WHERE memory_id=?", (before.id,))
         return after
 
     def create_superseding(
@@ -227,13 +257,15 @@ class MemoryRepository:
                 INSERT INTO memories(
                     id, user_id, content, type, status, source, importance, confidence,
                     created_at, updated_at, last_accessed_at, valid_from, valid_until,
+                    privacy_level, retention_policy, review_at, origin, retrieval_count,
                     tags_json, entity_refs_json, metadata_json, supersedes_memory_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 self.record_values(new),
             )
             self.insert_history(connection, old_history)
             self.insert_history(connection, new_history)
+            self.replace_ngrams(connection, new)
         return new
 
     def history(self, memory_id: str) -> list[MemoryHistoryRecord]:
@@ -255,6 +287,28 @@ class MemoryRepository:
             for row in rows
         ]
 
+    def mark_accessed(self, records: list[MemoryRecord], accessed_at: str) -> None:
+        if not records:
+            return
+        with self.lock, self.connect() as connection:
+            connection.executemany(
+                "UPDATE memories SET last_accessed_at=?, retrieval_count=retrieval_count+1 WHERE id=? AND user_id=?",
+                [(accessed_at, record.id, record.user_id) for record in records],
+            )
+
+    def search_lexical(self, user_id: str, grams: set[str], limit: int = 100) -> list[MemoryRecord]:
+        if not grams:
+            return self.list(user_id, statuses=["active"], limit=limit)
+        placeholders = ",".join("?" for _ in grams)
+        params = [user_id, *sorted(grams), max(1, min(limit, 500))]
+        sql = f"""SELECT memory.* FROM memories memory
+            JOIN memory_ngrams grams ON grams.memory_id=memory.id
+            WHERE memory.user_id=? AND memory.status='active' AND grams.gram IN ({placeholders})
+            GROUP BY memory.id ORDER BY COUNT(*) DESC, memory.importance DESC, memory.updated_at DESC LIMIT ?"""
+        with self.connect() as connection:
+            rows = connection.execute(sql, params).fetchall()
+        return [MemoryRecord.from_row(row) for row in rows]
+
     def record_values(self, record: MemoryRecord) -> tuple:
         return (
             record.id,
@@ -270,11 +324,35 @@ class MemoryRepository:
             record.last_accessed_at,
             record.valid_from,
             record.valid_until,
+            record.privacy_level,
+            record.retention_policy,
+            record.review_at,
+            record.origin,
+            record.retrieval_count,
             json.dumps(record.tags, ensure_ascii=False),
             json.dumps(record.entity_refs, ensure_ascii=False),
             json.dumps(record.metadata, ensure_ascii=False),
             record.supersedes_memory_id,
         )
+
+    def ensure_column(self, connection, table: str, column: str, definition: str) -> None:
+        columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    def rebuild_ngram_index(self, connection) -> None:
+        connection.execute("DELETE FROM memory_ngrams")
+        for row in connection.execute("SELECT * FROM memories WHERE status<>'deleted'").fetchall():
+            self.replace_ngrams(connection, MemoryRecord.from_row(row))
+
+    def replace_ngrams(self, connection, record: MemoryRecord) -> None:
+        connection.execute("DELETE FROM memory_ngrams WHERE memory_id=?", (record.id,))
+        grams = self.ngrams(f"{record.content} {' '.join(record.tags)} {' '.join(record.entity_refs)}")
+        connection.executemany("INSERT OR IGNORE INTO memory_ngrams(memory_id, user_id, gram) VALUES (?, ?, ?)", [(record.id, record.user_id, gram) for gram in grams])
+
+    def ngrams(self, text: str) -> set[str]:
+        compact = "".join(text.casefold().split())
+        return {compact[index:index + 2] for index in range(max(0, len(compact) - 1)) if compact[index:index + 2].strip()}
 
     def insert_history(self, connection, history: MemoryHistoryRecord) -> None:
         connection.execute(

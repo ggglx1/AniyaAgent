@@ -11,6 +11,8 @@ from main.tools.tool_result import ToolCallValidator, ToolResult
 from main.tools.personal_tools import build_personal_tools
 from main.tools.personal_state_tools import build_personal_state_tools
 from main.tools.daily_tools import build_daily_tools
+from main.tools.routine_tools import build_routine_tools
+from main.tools.memory_tools import build_memory_tools
 from main.teams.worktree_manager import WorktreeManager
 
 
@@ -1067,6 +1069,10 @@ class Tools:
         personal_memory=None,
         personal_state=None,
         daily_planner=None,
+        routine_manager=None,
+        routine_dispatcher=None,
+        conversation_memory=None,
+        legacy_memory_migration=None,
     ):
         self.workdir = workdir.resolve()
         self.workdir_provider = workdir_provider
@@ -1084,12 +1090,18 @@ class Tools:
         if personal_profile is not None and personal_memory is not None:
             for personal_tool in build_personal_tools(personal_profile, personal_memory):
                 self.register(personal_tool)
+        if conversation_memory is not None and personal_memory is not None and legacy_memory_migration is not None:
+            for memory_tool in build_memory_tools(conversation_memory, personal_memory, legacy_memory_migration):
+                self.register(memory_tool)
         if personal_state is not None:
             for state_tool in build_personal_state_tools(personal_state):
                 self.register(state_tool)
         if daily_planner is not None:
             for daily_tool in build_daily_tools(daily_planner):
                 self.register(daily_tool)
+        if routine_manager is not None:
+            for routine_tool in build_routine_tools(routine_manager, routine_dispatcher):
+                self.register(routine_tool)
 
         if skill_loader is not None:
             self.register(LoadSkillTool(skill_loader))

@@ -30,6 +30,12 @@ class ProjectStatus(str, Enum):
     ARCHIVED = "archived"
 
 
+class RoutineType(str, Enum):
+    MORNING_PLAN = "morning_plan"
+    EVENING_REVIEW = "evening_review"
+    WEEKLY_REVIEW = "weekly_review"
+
+
 @dataclass
 class PersonalTask:
     id: str
@@ -86,6 +92,25 @@ class PersonalProject:
     key_decisions: list[str] = field(default_factory=list)
     review_cadence: str = ""
     last_reviewed_at: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class PersonalRoutine:
+    id: str
+    user_id: str
+    name: str
+    routine_type: str
+    cron: str
+    timezone: str
+    target_channel: str
+    enabled: bool
+    last_run_at: str = ""
+    last_result: str = ""
     created_at: str = ""
     updated_at: str = ""
 

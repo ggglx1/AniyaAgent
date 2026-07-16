@@ -376,23 +376,14 @@ class WeixinChannel:
         if not text:
             return None
 
-        response = self.channel_runtime.handle_message(
-            ChannelMessage(
-                channel_id=self.channel_id,
-                user_id=from_user,
-                conversation_id=from_user,
-                text=text,
-                kind=ChannelKind.WEIXIN,
-                trust_level=TrustLevel.MEDIUM,
-                files=files,
-                images=images,
-                metadata={
-                    "message_id": message_id,
-                    "context_token": context_token,
-                    "raw_message_type": raw_message.get("message_type"),
-                },
-            ),
-            deliver=False,
+        # Weixin is notification-only: never route inbound text into the Agent or user memory.
+        response = AgentResponse(
+            channel_id=self.channel_id,
+            conversation_id=from_user,
+            run_id=f"weixin_inbound_{message_id}",
+            status="notification",
+            text="请回到 Web 继续对话。",
+            metadata={"inbound_message_id": message_id, "activity_only": True},
         )
         self.send(response)
         return response

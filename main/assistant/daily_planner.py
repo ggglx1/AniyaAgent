@@ -136,6 +136,40 @@ class DailyPlanner:
         self.write_json_view("EVENING_REVIEW.md", "Evening Review", review)
         return review
 
+    def weekly_review(self, now: datetime | None = None) -> dict:
+        current = self.utc_now(now)
+        week_start = current - timedelta(days=7)
+        tasks = self.state.list_tasks(limit=500)
+        projects = self.state.list_projects(statuses=["active", "paused"], limit=100)
+        completed = [
+            task.to_dict() for task in tasks
+            if task.status == "done" and (self.parse_datetime(task.updated_at) or current) >= week_start
+        ]
+        open_tasks = [
+            task.to_dict() for task in tasks
+            if task.status in {"inbox", "planned", "waiting", "in_progress", "deferred"}
+        ]
+        stale = [
+            task for task in open_tasks
+            if (self.parse_datetime(task.get("updated_at", "")) or current) < week_start
+        ]
+        review = {
+            "period_start": self.iso(week_start),
+            "period_end": self.iso(current),
+            "completed_tasks": completed,
+            "open_tasks": self.sort_tasks(open_tasks),
+            "stale_tasks": self.sort_tasks(stale),
+            "active_projects": [project.to_dict() for project in projects],
+            "reflection_questions": [
+                "Which result mattered most this week?",
+                "Which open commitment should be prioritized, delegated, deferred, or cancelled?",
+                "Does every active project have a concrete next action?",
+            ],
+            "note": "Weekly review is observational and does not silently modify personal state.",
+        }
+        self.write_json_view("WEEKLY_REVIEW.md", "Weekly Review", review)
+        return review
+
     def reflection_questions(self, overview: dict, unfinished: list[dict]) -> list[str]:
         questions = ["What was the most useful progress today?"]
         if unfinished:

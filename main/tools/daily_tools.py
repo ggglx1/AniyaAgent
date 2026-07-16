@@ -48,9 +48,22 @@ class GenerateEveningReviewTool(DailyTool):
     def run(self) -> str: return self.json(self.planner.evening_review())
 
 
+class GenerateWeeklyReviewTool(DailyTool):
+    name = "generate_weekly_review"
+    definition = {
+        "name": name,
+        "description": "Generate a factual seven-day review from tasks and active project state.",
+        "input_schema": {"type": "object", "properties": {}},
+    }
+
+    def __init__(self, planner): self.planner = planner
+    def run(self) -> str: return self.json(self.planner.weekly_review())
+
+
 def build_daily_tools(planner) -> list:
     return [
         GetTodayOverviewTool(planner),
         GenerateMorningPlanTool(planner),
         GenerateEveningReviewTool(planner),
+        GenerateWeeklyReviewTool(planner),
     ]

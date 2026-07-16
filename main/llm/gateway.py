@@ -111,7 +111,7 @@ class LlmGateway:
         return requested_model or self.primary_model
 
     def model_for_task(self, task_type: str) -> str | None:
-        env_name = {
+        suffix = {
             "main": "MODEL_ID",
             "team": "TEAM_MODEL_ID",
             "memory_match": "MEMORY_MODEL_ID",
@@ -123,9 +123,20 @@ class LlmGateway:
             "structured_repair": "REPAIR_MODEL_ID",
         }.get(task_type)
 
-        if not env_name:
+        if not suffix:
             return None
-        return os.getenv(env_name) or None
+        provider = self.active_provider_name()
+        prefix = "ANTHROPIC" if provider == "anthropic" else "OPENAI"
+        return os.getenv(f"{prefix}_{suffix}") or None
+
+    def active_provider_name(self) -> str:
+        settings_getter = getattr(self.base_client, "active_settings", None)
+        if settings_getter is None:
+            return "anthropic"
+        try:
+            return str(settings_getter().provider)
+        except Exception:
+            return "anthropic"
 
     def priority_for_task(self, task_type: str) -> int:
         if task_type == "main":

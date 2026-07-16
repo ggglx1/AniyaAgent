@@ -18,7 +18,7 @@ class Prompt(ABC):
 
 
 class SystemPrompt(Prompt):
-    def __init__(self, workdir: Path, skills, memory, persona=None, profile=None, personal_state=None):
+    def __init__(self, workdir: Path, skills, memory=None, persona=None, profile=None, personal_state=None):
         self.workdir = workdir.resolve()
         self.skills = skills
         self.memory = memory
@@ -45,7 +45,7 @@ class SystemPrompt(Prompt):
         if agent_role == "parent":
             loaded_skills = self.skills.catalog_text()
             skill_catalog = "" if loaded_skills == "(no skills found)" else loaded_skills
-            memory_index = self.memory.read_memory_index()
+            memory_index = self.memory.read_memory_index() if self.memory is not None else ""
 
         return {
             "agent_role": agent_role,
@@ -92,6 +92,8 @@ class SystemPrompt(Prompt):
             sections.append(self.personal_state_context_section(context["personal_state_summary"]))
         if context.get("agent_role") == "parent" and "get_today_overview" in enabled_tools:
             sections.append(self.daily_loop_section())
+        if context.get("agent_role") == "parent" and "create_routine" in enabled_tools:
+            sections.append(self.routine_section())
         if context.get("agent_role") == "parent" and "task" in enabled_tools:
             sections.append(self.subagent_section())
         if context.get("agent_role") == "parent" and "create_task" in enabled_tools:
@@ -161,6 +163,15 @@ class SystemPrompt(Prompt):
             "small prioritized plan and generate_evening_review for a factual end-of-day review. These "
             "outputs are advisory: do not mark tasks complete, reschedule work, or create memories unless "
             "the user explicitly requests the state change."
+        )
+
+    def routine_section(self) -> str:
+        return (
+            "Scheduled routines:\n"
+            "Use create_routine only after the user explicitly requests recurring proactive behavior. "
+            "Use update_routine to pause, resume, or reschedule it, and list_routines to explain what will "
+            "run automatically. Morning, evening, and weekly outputs are advisory and must not silently "
+            "change tasks, projects, profile, or memory."
         )
 
     def workspace_section(self, context: dict) -> str:

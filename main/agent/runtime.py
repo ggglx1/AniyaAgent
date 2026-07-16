@@ -9,6 +9,7 @@ from typing import Callable
 from main.storage.audit_log import AuditLog
 from main.storage.conversation_store import ConversationStore
 from main.agent.runtime_context import bind_runtime, clear_runtime
+from main.conversation import ConversationMemoryRepository, ConversationMemoryService
 
 
 @dataclass
@@ -20,6 +21,7 @@ class RunResult:
     error: str = ""
     started_at: float = 0
     finished_at: float = 0
+    memory_sources: dict = None
 
 
 class AgentRuntime:
@@ -29,12 +31,22 @@ class AgentRuntime:
         agent_loop: Callable[[list], None],
         extract_text: Callable[[object], str],
         max_run_seconds: int = 600,
+        conversation_memory: ConversationMemoryService | None = None,
+        profile_store=None,
+        memory_pipeline=None,
+        memory_maintenance=None,
+        memory_source_provider=None,
     ):
         self.workdir = workdir.resolve()
         self.agent_loop = agent_loop
         self.extract_text = extract_text
         self.max_run_seconds = max_run_seconds
         self.conversations = ConversationStore(self.workdir)
+        self.conversation_memory = conversation_memory or ConversationMemoryService(ConversationMemoryRepository(self.workdir))
+        self.profile_store = profile_store
+        self.memory_pipeline = memory_pipeline
+        self.memory_maintenance = memory_maintenance
+        self.memory_source_provider = memory_source_provider
         self.audit = AuditLog(self.workdir)
         self.session_locks: dict[str, threading.Lock] = {}
         self.session_locks_guard = threading.Lock()
@@ -82,6 +94,7 @@ class AgentRuntime:
                 error="Another run is already active for this session.",
                 started_at=started_at,
                 finished_at=time.time(),
+                memory_sources=self.memory_sources(),
             )
             self.audit.write(run_id, "run.rejected", asdict(result))
             return result
@@ -98,7 +111,21 @@ class AgentRuntime:
                 },
             )
             messages = self.conversations.load(session_id)
+            initial_message_count = len(messages)
             messages.append({"role": "user", "content": user_text})
+            factual_ids: list[str] = []
+            if self.is_web_context(channel_context):
+                timezone_name = self.timezone_for_web()
+                if self.memory_maintenance is not None:
+                    self.memory_maintenance.tick()
+                else:
+                    # First Web request on a new day repairs summaries left open on prior days.
+                    self.conversation_memory.rebuild_prior_days(timezone_name)
+                factual_ids.append(
+                    self.conversation_memory.repository.append_message(
+                        "user", user_text, timezone_name=timezone_name, metadata={"channel": "web"}
+                    ).message_id
+                )
             self.conversations.save(session_id, messages)
             checkpoint_path = self.conversations.checkpoint(session_id, run_id, messages)
             self.audit.write(run_id, "checkpoint.before", {"path": str(checkpoint_path)})
@@ -110,6 +137,14 @@ class AgentRuntime:
                 raise TimeoutError(f"Run exceeded {self.max_run_seconds} seconds.")
 
             self.conversations.save(session_id, messages)
+            if self.is_web_context(channel_context):
+                factual_ids.extend(
+                    self.conversation_memory.append_runtime_messages(
+                        messages, initial_message_count + 1, self.timezone_for_web()
+                    )
+                )
+                if self.memory_pipeline is not None:
+                    self.memory_pipeline.process(factual_ids, user_id="local")
             checkpoint_path = self.conversations.checkpoint(session_id, run_id, messages)
             output = self.latest_assistant_text(messages)
             result = RunResult(
@@ -119,6 +154,7 @@ class AgentRuntime:
                 output=output,
                 started_at=started_at,
                 finished_at=time.time(),
+                memory_sources=self.memory_sources(),
             )
             self.audit.write(run_id, "checkpoint.after", {"path": str(checkpoint_path)})
             self.audit.write(run_id, "run.completed", asdict(result))
@@ -140,6 +176,7 @@ class AgentRuntime:
                 error=f"{type(exc).__name__}: {exc}",
                 started_at=started_at,
                 finished_at=time.time(),
+                memory_sources=self.memory_sources(),
             )
             self.audit.write(
                 run_id,
@@ -168,3 +205,14 @@ class AgentRuntime:
 
     def new_run_id(self) -> str:
         return f"run_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+
+    def is_web_context(self, context: dict) -> bool:
+        return context.get("kind") == "web" or context.get("channel_id") == "web"
+
+    def timezone_for_web(self) -> str:
+        if self.profile_store is None:
+            return "Asia/Shanghai"
+        return str(self.profile_store.get().get("timezone") or "Asia/Shanghai")
+
+    def memory_sources(self) -> dict:
+        return dict(self.memory_source_provider() or {}) if self.memory_source_provider else {}

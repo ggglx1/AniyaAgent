@@ -3,12 +3,27 @@ type WsMessage =
   | { type: 'agent.status'; data: { status: string } }
   | { type: 'agent.output'; data: { role: 'assistant' | 'log' | 'error'; content: string } }
   | { type: 'agent.permission'; data: { requestId: string; tool: string; reason: string; input: unknown } }
-  | { type: 'channels.list'; data: { channels: ChannelInfo[] } };
+  | { type: 'channels.list'; data: { channels: ChannelInfo[] } }
+  | { type: 'models.list'; data: ModelProvidersPayload }
+  | { type: 'models.error'; data: { message: string } };
 
 type ChannelInfo = {
   channel_id: string;
   kind: string;
   trust_level: string;
+};
+
+type ModelProvider = {
+  name: string;
+  configured: boolean;
+  active: boolean;
+  base_url: string;
+  model: string;
+};
+
+type ModelProvidersPayload = {
+  active: string;
+  providers: ModelProvider[];
 };
 
 type MessageRole = 'user' | 'assistant' | 'log' | 'error';
@@ -38,6 +53,15 @@ const channelsCount = document.querySelector<HTMLElement>('#channels-count')!;
 const channelsToggle = document.querySelector<HTMLButtonElement>('#channels-toggle')!;
 const channelsPopover = document.querySelector<HTMLElement>('#channels-popover')!;
 const refreshChannelsButton = document.querySelector<HTMLButtonElement>('#refresh-channels')!;
+const modelsPopover = document.querySelector<HTMLElement>('#models-popover')!;
+const activeModel = document.querySelector<HTMLElement>('#active-model')!;
+const modelsSummary = document.querySelector<HTMLElement>('#models-summary')!;
+const modelsEl = document.querySelector<HTMLElement>('#models')!;
+const modelsFeedback = document.querySelector<HTMLElement>('#models-feedback')!;
+const channelsFooter = channelsPopover.querySelector<HTMLElement>('.popover-foot')!;
+
+channelsPopover.insertBefore(modelsPopover, channelsFooter);
+modelsPopover.classList.remove('hidden');
 
 const roleLabels: Record<MessageRole, string> = {
   user: '你',
@@ -58,6 +82,7 @@ let pendingPermissionId = '';
 let reconnectTimer = 0;
 let channelRefreshTimer = 0;
 let activityTimer = 0;
+let modelSelectionInFlight = false;
 
 function connect(): void {
   window.clearTimeout(reconnectTimer);
@@ -68,6 +93,7 @@ function connect(): void {
   ws.onopen = () => {
     setStatus('ready', 'connected');
     requestChannels();
+    requestModels();
   };
 
   ws.onmessage = (event) => {
@@ -102,6 +128,18 @@ function connect(): void {
     if (message.type === 'channels.list') {
       finishChannelRefresh();
       renderChannels(message.data.channels);
+      return;
+    }
+
+    if (message.type === 'models.list') {
+      modelSelectionInFlight = false;
+      renderModels(message.data);
+      return;
+    }
+
+    if (message.type === 'models.error') {
+      modelSelectionInFlight = false;
+      showModelFeedback(message.data.message);
       return;
     }
 
@@ -211,7 +249,7 @@ function addMessage(role: MessageRole, content: string): void {
   avatar.setAttribute('aria-hidden', 'true');
   if (role === 'assistant') {
     const image = document.createElement('img');
-    image.src = '/assets/aniya-logo.jpg';
+    image.src = '/assets/aniya-chat-avatar.jpg';
     image.alt = '';
     avatar.appendChild(image);
   } else {
@@ -325,9 +363,84 @@ function formatTrust(level: string): string {
   return labels[level] || level;
 }
 
+function requestModels(): void {
+  if (!send({ type: 'models.list' })) return;
+  modelsSummary.textContent = '正在读取可用模型';
+}
+
+function renderModels(payload: ModelProvidersPayload): void {
+  const active = payload.providers.find((provider) => provider.active) || payload.providers.find((provider) => provider.name === payload.active);
+  const activeLabel = active ? formatProviderName(active.name) : '模型';
+  activeModel.textContent = active ? active.model : activeLabel;
+  modelsSummary.textContent = active
+    ? `${activeLabel} · ${active.model}`
+    : '暂无可用模型';
+  modelsFeedback.classList.add('hidden');
+  modelsFeedback.textContent = '';
+  modelsEl.replaceChildren();
+
+  if (!payload.providers.length) {
+    const empty = document.createElement('div');
+    empty.className = 'channel-empty';
+    empty.textContent = '暂时没有可用模型';
+    modelsEl.appendChild(empty);
+    return;
+  }
+
+  for (const provider of payload.providers) {
+    const option = document.createElement('button');
+    option.className = `model-option${provider.active ? ' active' : ''}`;
+    option.type = 'button';
+    option.disabled = !provider.configured || provider.active || modelSelectionInFlight;
+    option.setAttribute('aria-pressed', String(provider.active));
+    option.title = provider.configured ? `切换到 ${formatProviderName(provider.name)}` : '此模型尚未配置密钥';
+
+    const copy = document.createElement('span');
+    copy.className = 'model-option-copy';
+    const name = document.createElement('strong');
+    name.textContent = formatProviderName(provider.name);
+    const model = document.createElement('span');
+    model.textContent = provider.model || provider.base_url;
+    copy.append(name, model);
+
+    const state = document.createElement('span');
+    state.className = 'model-option-state';
+    state.textContent = provider.active ? '当前使用' : (provider.configured ? '可切换' : '未配置');
+
+    option.append(copy, state);
+    option.addEventListener('click', () => selectModel(provider.name));
+    modelsEl.appendChild(option);
+  }
+}
+
+function selectModel(provider: string): void {
+  if (modelSelectionInFlight || !send({ type: 'models.select', data: { provider } })) return;
+  modelSelectionInFlight = true;
+  modelsSummary.textContent = '正在切换模型';
+  for (const option of modelsEl.querySelectorAll<HTMLButtonElement>('.model-option')) option.disabled = true;
+}
+
+function showModelFeedback(message: string): void {
+  modelsFeedback.textContent = message || '模型切换失败';
+  modelsFeedback.classList.remove('hidden');
+  modelsSummary.textContent = '模型状态未更新';
+  for (const option of modelsEl.querySelectorAll<HTMLButtonElement>('.model-option')) {
+    if (!option.classList.contains('active')) option.disabled = false;
+  }
+}
+
+function formatProviderName(name: string): string {
+  const labels: Record<string, string> = {
+    anthropic: 'Anthropic',
+    openai: 'OpenAI',
+  };
+  return labels[name] || name;
+}
+
 function setChannelsOpen(open: boolean): void {
   channelsPopover.classList.toggle('hidden', !open);
   channelsToggle.setAttribute('aria-expanded', String(open));
+  if (open) requestModels();
 }
 
 function setComposerOpen(open: boolean): void {

@@ -117,8 +117,8 @@ def run_agent(content: str) -> None:
             response = MainLoop.handle_channel_message(
                 ChannelMessage(
                     channel_id="web",
-                    user_id="web",
-                    conversation_id="web",
+                    user_id="local",
+                    conversation_id="personal",
                     text=content,
                     kind=ChannelKind.WEB,
                     trust_level=TrustLevel.HIGH,

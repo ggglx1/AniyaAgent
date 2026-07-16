@@ -22,6 +22,8 @@ class WebChannel:
         port: int = 9528,
         auth_token: str = "",
         permission_timeout_seconds: int = 300,
+        llm_control=None,
+        memory_admin=None,
     ):
         self.channel_runtime = channel_runtime
         self.channel_id = channel_id
@@ -31,6 +33,8 @@ class WebChannel:
         self.port = port
         self.auth_token = auth_token
         self.permission_timeout_seconds = permission_timeout_seconds
+        self.llm_control = llm_control
+        self.memory_admin = memory_admin
         self.queues: dict[str, queue.Queue[dict]] = {}
         self.request_sessions: dict[str, str] = {}
         self.conversation_requests: dict[str, str] = {}
@@ -75,8 +79,9 @@ class WebChannel:
         if not text:
             return {"ok": False, "error": "Message text is required."}
 
-        conversation_id = str(payload.get("conversation_id") or payload.get("session_id") or "web")
-        user_id = str(payload.get("user_id") or "web")
+        # Desktop and mobile Web are one local user's continuous conversation.
+        conversation_id = "personal"
+        user_id = "local"
         request_id = uuid.uuid4().hex
         event_queue: queue.Queue[dict] = queue.Queue()
 
@@ -258,6 +263,42 @@ class WebChannel:
                         return
                     self._send_json({"ok": True, "channels": channel.channel_runtime.registry.list_channels()})
                     return
+                if parsed.path == "/llm/providers":
+                    if not self._authorized():
+                        self._send_json({"ok": False, "error": "Unauthorized"}, status=401)
+                        return
+                    if channel.llm_control is None:
+                        self._send_json({"ok": False, "error": "LLM provider control is unavailable"}, status=503)
+                        return
+                    self._send_json({"ok": True, **channel.llm_control.list_providers()})
+                    return
+                if parsed.path == "/memory/messages":
+                    if not self._authorized() or channel.memory_admin is None:
+                        self._send_json({"ok": False, "error": "Memory API unavailable"}, status=503)
+                        return
+                    query = parse_qs(parsed.query)
+                    self._send_json({"ok": True, "messages": channel.memory_admin.factual_messages(query.get("date", [""])[0], int(query.get("limit", ["100"])[0]))})
+                    return
+                if parsed.path == "/memory/daily":
+                    if not self._authorized() or channel.memory_admin is None:
+                        self._send_json({"ok": False, "error": "Memory API unavailable"}, status=503)
+                        return
+                    query = parse_qs(parsed.query)
+                    self._send_json({"ok": True, "daily": channel.memory_admin.daily_memory(query.get("date", [""])[0]), "days": channel.memory_admin.daily_memories()})
+                    return
+                if parsed.path == "/memory/long-term":
+                    if not self._authorized() or channel.memory_admin is None:
+                        self._send_json({"ok": False, "error": "Memory API unavailable"}, status=503)
+                        return
+                    query = parse_qs(parsed.query)
+                    self._send_json({"ok": True, "memories": channel.memory_admin.long_term_memories(query.get("status", [""])[0])})
+                    return
+                if parsed.path == "/memory/export":
+                    if not self._authorized() or channel.memory_admin is None:
+                        self._send_json({"ok": False, "error": "Memory API unavailable"}, status=503)
+                        return
+                    self._send_json({"ok": True, "messages": channel.memory_admin.retention.export()})
+                    return
                 if parsed.path == "/stream":
                     if not self._authorized():
                         self._send_json({"ok": False, "error": "Unauthorized"}, status=401)
@@ -283,6 +324,50 @@ class WebChannel:
                     permission_id = str(payload.get("request_id") or payload.get("permission_id") or "")
                     ok = channel.answer_permission(permission_id, bool(payload.get("allow")))
                     self._send_json({"ok": ok})
+                    return
+                if parsed.path == "/llm/provider":
+                    if not self._authorized():
+                        self._send_json({"ok": False, "error": "Unauthorized"}, status=401)
+                        return
+                    if channel.llm_control is None:
+                        self._send_json({"ok": False, "error": "LLM provider control is unavailable"}, status=503)
+                        return
+                    payload = self._read_json()
+                    try:
+                        result = channel.llm_control.select_provider(str(payload.get("provider") or ""))
+                    except ValueError as exc:
+                        self._send_json({"ok": False, "error": str(exc)}, status=400)
+                        return
+                    self._send_json({"ok": True, **result})
+                    return
+                if parsed.path == "/memory/redact":
+                    if not self._authorized() or channel.memory_admin is None:
+                        self._send_json({"ok": False, "error": "Memory API unavailable"}, status=503)
+                        return
+                    payload = self._read_json()
+                    try:
+                        channel.memory_admin.retention.redact(str(payload.get("message_id") or ""))
+                    except (ValueError, FileNotFoundError) as exc:
+                        self._send_json({"ok": False, "error": str(exc)}, status=400)
+                        return
+                    self._send_json({"ok": True})
+                    return
+                if parsed.path == "/memory/long-term/action":
+                    if not self._authorized() or channel.memory_admin is None:
+                        self._send_json({"ok": False, "error": "Memory API unavailable"}, status=503)
+                        return
+                    payload = self._read_json()
+                    manager, memory_id, action = channel.memory_admin.personal_memory, str(payload.get("memory_id") or ""), str(payload.get("action") or "")
+                    try:
+                        if action == "confirm": result = manager.confirm(memory_id)
+                        elif action == "correct": result = manager.supersede(memory_id, str(payload.get("content") or ""))
+                        elif action == "archive": result = manager.archive(memory_id)
+                        elif action == "forget": result = manager.forget(memory_id)
+                        else: raise ValueError("Unsupported memory action")
+                    except (ValueError, FileNotFoundError) as exc:
+                        self._send_json({"ok": False, "error": str(exc)}, status=400)
+                        return
+                    self._send_json({"ok": True, "memory": result.to_dict()})
                     return
                 self._send_json({"ok": False, "error": "Not found"}, status=404)
 

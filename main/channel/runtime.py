@@ -21,6 +21,7 @@ class ChannelRuntime:
                 "user_id": message.user_id,
                 "kind": message.kind.value,
                 "trust_level": message.trust_level.value,
+                "memory_sources": run_result.memory_sources or {},
             },
         )
         if deliver:
