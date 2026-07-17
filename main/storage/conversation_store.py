@@ -41,3 +41,18 @@ class ConversationStore:
     def safe_id(self, value: str) -> str:
         return "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in str(value))
 
+    def redact_text_everywhere(self, text: str) -> int:
+        """Best-effort removal of a factual payload from transient runtime/checkpoint copies."""
+        if not text:
+            return 0
+        changed = 0
+        for path in self.store_dir.rglob("*.json") if self.store_dir.exists() else []:
+            try:
+                raw = path.read_text(encoding="utf-8")
+                if text not in raw:
+                    continue
+                path.write_text(raw.replace(text, "[redacted]"), encoding="utf-8")
+                changed += 1
+            except OSError:
+                continue
+        return changed

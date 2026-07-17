@@ -1073,18 +1073,21 @@ class Tools:
         routine_dispatcher=None,
         conversation_memory=None,
         legacy_memory_migration=None,
+        capability_profile: str = "developer",
     ):
         self.workdir = workdir.resolve()
         self.workdir_provider = workdir_provider
         self.registry = {}
         self.validator = ToolCallValidator()
         self.todo_tool = TodoWriteTool()
+        self.capability_profile = capability_profile
 
-        self.register(BashTool(self.workdir, self.workdir_provider))
-        self.register(ReadFileTool(self.workdir, self.workdir_provider))
-        self.register(WriteFileTool(self.workdir, self.workdir_provider))
-        self.register(EditFileTool(self.workdir, self.workdir_provider))
-        self.register(GlobTool(self.workdir, self.workdir_provider))
+        if capability_profile == "developer":
+            self.register(BashTool(self.workdir, self.workdir_provider))
+            self.register(ReadFileTool(self.workdir, self.workdir_provider))
+            self.register(WriteFileTool(self.workdir, self.workdir_provider))
+            self.register(EditFileTool(self.workdir, self.workdir_provider))
+            self.register(GlobTool(self.workdir, self.workdir_provider))
         self.register(self.todo_tool)
 
         if personal_profile is not None and personal_memory is not None:
@@ -1103,33 +1106,33 @@ class Tools:
             for routine_tool in build_routine_tools(routine_manager, routine_dispatcher):
                 self.register(routine_tool)
 
-        if skill_loader is not None:
+        if capability_profile == "developer" and skill_loader is not None:
             self.register(LoadSkillTool(skill_loader))
-        if compact_enabled:
+        if capability_profile == "developer" and compact_enabled:
             self.register(CompactTool())
-        if task_runner is not None:
+        if capability_profile == "developer" and task_runner is not None:
             self.register(TaskTool(task_runner))
-        if task_system is not None and task_tool_mode == "full":
+        if capability_profile == "developer" and task_system is not None and task_tool_mode == "full":
             self.register(CreateTaskTool(task_system))
             self.register(ListTasksTool(task_system))
             self.register(GetTaskTool(task_system))
             self.register(ClaimTaskTool(task_system, after_task_claim))
             self.register(CompleteTaskTool(task_system, after_task_complete))
-        if task_system is not None and task_tool_mode == "worker":
+        if capability_profile == "developer" and task_system is not None and task_tool_mode == "worker":
             self.register(ListTasksTool(task_system))
             self.register(GetTaskTool(task_system))
             self.register(ClaimTaskTool(task_system, after_task_claim))
             self.register(CompleteTaskTool(task_system, after_task_complete))
-        if cron_scheduler is not None:
+        if capability_profile == "developer" and cron_scheduler is not None:
             self.register(ScheduleCronTool(cron_scheduler))
             self.register(ListCronsTool(cron_scheduler))
             self.register(CancelCronTool(cron_scheduler))
-        if background_tasks is not None:
+        if capability_profile == "developer" and background_tasks is not None:
             self.register(ListBackgroundTasksTool(background_tasks))
             self.register(GetBackgroundTaskTool(background_tasks))
             self.register(CancelBackgroundTaskTool(background_tasks))
             self.register(WaitBackgroundTaskTool(background_tasks))
-        if agent_teams is not None:
+        if capability_profile == "developer" and agent_teams is not None:
             if agent_name == "lead":
                 self.register(SpawnTeammateTool(agent_teams))
                 self.register(CheckInboxTool(agent_teams, agent_name))
@@ -1140,7 +1143,7 @@ class Tools:
             else:
                 self.register(SubmitPlanTool(agent_teams, agent_name))
             self.register(SendMessageTool(agent_teams, agent_name))
-        if worktree_manager is not None and agent_name == "lead":
+        if capability_profile == "developer" and worktree_manager is not None and agent_name == "lead":
             self.register(CreateWorktreeTool(worktree_manager))
             self.register(BindTaskToWorktreeTool(worktree_manager))
             self.register(RemoveWorktreeTool(worktree_manager))

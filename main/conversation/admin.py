@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .retention import ConversationRetentionService
+from main.notifications import NotificationOutbox
 
 
 class MemoryAdminService:
@@ -10,6 +11,7 @@ class MemoryAdminService:
         self.conversation = conversation
         self.personal_memory = personal_memory
         self.retention = ConversationRetentionService(conversation.repository, personal_memory)
+        self.notifications = NotificationOutbox(conversation.repository.workdir)
 
     def factual_messages(self, local_date: str = "", limit: int = 100) -> list[dict]:
         records = self.conversation.repository.messages_for_day(local_date, include_redacted=True) if local_date else self.conversation.repository.recent_messages(limit)
@@ -28,3 +30,6 @@ class MemoryAdminService:
         with self.conversation.repository.connect() as connection:
             rows = connection.execute("SELECT message_id FROM long_term_memory_sources WHERE memory_id=? ORDER BY message_id", (memory_id,)).fetchall()
         return [row["message_id"] for row in rows]
+
+    def notification_status(self, limit: int = 100) -> list[dict]:
+        return self.notifications.list(limit)

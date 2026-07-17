@@ -255,6 +255,11 @@ class ConversationMemoryRepository:
             row = connection.execute("SELECT 1 FROM conversation_messages WHERE message_id=? AND redacted_at=''", (message_id,)).fetchone()
         return row is not None
 
+    def message(self, message_id: str):
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM conversation_messages WHERE message_id=?", (message_id,)).fetchone()
+        return self.to_message(row) if row else None
+
     def export(self) -> list[dict]:
         with self.connect() as connection:
             rows = connection.execute("SELECT * FROM conversation_messages ORDER BY seq").fetchall()

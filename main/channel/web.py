@@ -117,7 +117,8 @@ class WebChannel:
     def send(self, response: AgentResponse) -> ChannelSendResult:
         request_id = self.conversation_requests.get(response.conversation_id)
         if not request_id:
-            return ChannelSendResult(True, "no active stream")
+            # In-app delivery is only durable when a notification store records it.
+            return ChannelSendResult(False, "no active Web stream; not a durable delivery target")
         self._enqueue(
             request_id,
             {
@@ -298,6 +299,12 @@ class WebChannel:
                         self._send_json({"ok": False, "error": "Memory API unavailable"}, status=503)
                         return
                     self._send_json({"ok": True, "messages": channel.memory_admin.retention.export()})
+                    return
+                if parsed.path == "/notifications":
+                    if not self._authorized() or channel.memory_admin is None:
+                        self._send_json({"ok": False, "error": "Notification API unavailable"}, status=503)
+                        return
+                    self._send_json({"ok": True, "notifications": channel.memory_admin.notification_status()})
                     return
                 if parsed.path == "/stream":
                     if not self._authorized():

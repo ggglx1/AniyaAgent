@@ -1,4 +1,5 @@
 import json
+import hashlib
 import time
 from pathlib import Path
 from threading import Lock
@@ -16,7 +17,7 @@ class AuditLog:
             "ts": time.time(),
             "run_id": run_id,
             "type": event_type,
-            "payload": payload or {},
+            "payload": self.sanitize(payload or {}),
         }
         path = self.log_dir / f"{run_id}.jsonl"
         line = json.dumps(event, ensure_ascii=False, default=str)
@@ -24,3 +25,14 @@ class AuditLog:
             with path.open("a", encoding="utf-8") as file:
                 file.write(line + "\n")
 
+    def sanitize(self, value):
+        if isinstance(value, dict):
+            sanitized = {key: self.sanitize(item) for key, item in value.items()}
+            if "input_preview" in sanitized:
+                raw = str(sanitized.pop("input_preview"))
+                sanitized["input_hash"] = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+                sanitized["input_length"] = len(raw)
+            return sanitized
+        if isinstance(value, list):
+            return [self.sanitize(item) for item in value]
+        return value

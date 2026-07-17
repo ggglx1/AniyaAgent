@@ -118,7 +118,7 @@ class PersonalStateManager:
         scheduled_at: str,
         timezone_name: str = "Asia/Shanghai",
         recurrence: str = "",
-        target_channel: str = "web",
+        target_channel: str = "weixin",
         task_id: str = "",
         project_id: str = "",
         person_ref: str = "",

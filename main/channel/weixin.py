@@ -15,6 +15,7 @@ import requests
 from .base import AgentResponse, ChannelMessage, ChannelSendResult
 from .runtime import ChannelRuntime
 from .types import ChannelKind, TrustLevel
+from main.notifications import NotificationOutbox
 
 
 DEFAULT_BASE_URL = "https://ilinkai.weixin.qq.com"
@@ -172,6 +173,7 @@ class WeixinChannel:
         self.stop_event = threading.Event()
         self.poll_thread: threading.Thread | None = None
         self.lock = threading.Lock()
+        self.notification_outbox = NotificationOutbox(channel_runtime.agent_runtime.workdir)
 
     def start(self) -> bool:
         self.stop_event.clear()
@@ -220,8 +222,9 @@ class WeixinChannel:
         self.stop_event.set()
 
     def send(self, response: AgentResponse) -> ChannelSendResult:
-        receiver = response.conversation_id
-        context_token = self.context_tokens.get(receiver, "")
+        binding = self.notification_outbox.binding(response.conversation_id or "local")
+        receiver = str(binding.get("recipient_id") if binding else response.conversation_id)
+        context_token = str(binding.get("context_token") if binding else self.context_tokens.get(receiver, ""))
         if not self.api:
             return ChannelSendResult(False, "Weixin API is not initialized.")
         if not context_token:
@@ -409,6 +412,8 @@ class WeixinChannel:
             creds["base_url"] = self.base_url
             creds["context_tokens"] = dict(self.context_tokens)
             save_credentials(self.credentials_path, creds)
+            # Inbound messages remain notification-only, but establish/refresh the verified delivery binding.
+            self.notification_outbox.bind_owner("local", user_id, context_token)
 
     def check_send_response(self, receiver: str, response: dict) -> None:
         if response.get("ret") == SESSION_EXPIRED_CODE or response.get("errcode") == SESSION_EXPIRED_CODE:

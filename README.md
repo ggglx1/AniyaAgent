@@ -1,38 +1,32 @@
 # AniyaAgent
 
-AniyaAgent is a personal local assistant for task orchestration, daily workflows, reminders, knowledge, and remote operation from a mobile browser.
+[English](README.md) | [简体中文](README.zh-CN.md)
 
-It runs the Agent runtime on your own computer, supports local tool execution, persistent tasks, memory, background jobs, multi-agent collaboration, Git worktree isolation, and optional LangGraph workflow execution. A lightweight TypeScript client lets you operate the local Agent from a phone through LAN access or a Cloudflare Worker relay.
+A private AI assistant that runs on your own computer. It can chat, remember what matters, manage tasks and schedules, and send reminders to WeChat. Your data and tools stay on your device; AniyaAgent connects the pieces.
 
-## Features
+## What It Does
 
-- ReAct-style Agent loop with tool calling, tool execution, and result feedback.
-- Unified tool registry for file operations, shell commands, tasks, cron jobs, background jobs, team communication, and worktrees.
-- Permission and hook system for risky local actions.
-- Context engineering with memory, skills, prompt assembly, compaction, and error recovery.
-- Persistent task board, autonomous teammate agents, protocol messages, and plan approval.
-- LLM request gateway with queueing and task-based model routing.
-- Mobile browser client for local or remote control.
+- **Gets things done**: understands natural language, uses local tools, and works with files, commands, and tasks.
+- **Keeps context**: separates factual memory, daily memory, and long-term memory so conversations stay useful.
+- **Organizes daily life**: handles tasks, routines, scheduled reminders, and background work.
+- **Stays within reach**: use it from a desktop or mobile browser; optionally access it remotely through a Cloudflare Worker relay.
+- **Notifies without hijacking chat**: WeChat is a notification channel, not a conversation entry point.
 
 ## Architecture
 
-```text
-Phone Browser / CLI
-  -> AniyaAgent Client
-  -> Python Bridge
-  -> Agent Runtime
-  -> LLM API + Local Tools
-```
+![AniyaAgent Architecture](AnyaArchitecture.png)
 
-Remote mode:
+A request travels through five clear layers:
 
-```text
-Phone Browser -> Cloudflare Worker Relay <- Local AniyaAgent Client -> Python Agent
-```
+1. **Entry**: the Web Client serves desktop and mobile browsers; a Worker can relay remote access.
+2. **Access**: an Owner Token protects private access, so a local assistant does not become a public service by accident.
+3. **Runtime**: the Agent Runtime interprets requests, calls the LLM, orchestrates tools, and returns results to the conversation.
+4. **State**: three memory layers retain facts, daily context, and confirmed long-term information; the scheduler handles tasks, routines, and reminders.
+5. **Notifications**: when something needs attention, the runtime sends a WeChat reminder without taking over the conversation.
 
 ## Quick Start
 
-Install Python dependencies:
+Requirements: Python 3.10+ and a model service compatible with the Anthropic or OpenAI API.
 
 ```powershell
 cd C:\Users\24021\Desktop\java\learnclaudecode\AniyaAgent
@@ -40,75 +34,38 @@ pip install -r main/requirements.txt
 Copy-Item main/.env.example main/.env
 ```
 
-Edit `main/.env`:
+Edit `main/.env`. At minimum, configure `ANIYAAGENT_OWNER_TOKEN` plus the API key and model ID for your selected model provider.
 
-```env
-ANTHROPIC_API_KEY=your_api_key_here
-ANTHROPIC_MODEL_ID=your_model_id_here
-ANTHROPIC_BASE_URL=https://api.anthropic.com
-```
-
-Run CLI:
+Start the Web Client. It launches the local Agent service automatically:
 
 ```powershell
-python -m main.agent.main_loop
-```
-
-Run LangGraph version:
-
-```powershell
-python -m main.agent.main_loop_langgraph
-```
-
-## Mobile Client
-
-Start local web client:
-
-```powershell
-cd C:\Users\24021\Desktop\java\learnclaudecode\AniyaAgent\main\client
+cd main/client
 npm install
 npm run build
 npm start
 ```
 
-Open the printed LAN URL from your phone, for example:
+The terminal prints desktop and LAN URLs. Open the LAN URL on your phone, then enter the Owner Token.
 
-```text
-http://192.168.x.x:9527
-```
-
-For remote access, deploy the Worker under `main/client/worker`, then start the local client with:
+For scheduled reminders, routines, and WeChat notifications, start the scheduler in another terminal:
 
 ```powershell
-$env:ANIYAAGENT_WORKER_URL="https://your-worker.workers.dev"
-$env:ANIYAAGENT_SESSION_ID="replace-with-a-long-random-session"
-npm start
+python -m main.channel.run_scheduler
 ```
 
-## Configuration
+You can also run the Agent directly in the terminal:
 
-Memory is split into factual Web conversation history, daily summaries, and approved long-term memories. The default `MEMORY_MODE=structured_only` uses no legacy Markdown runtime. `legacy_audit` only reports old Markdown data; `legacy_migration` only permits preview, backup, and confirmed import.
-
-Optional LLM gateway settings:
-
-```env
-LLM_MAX_CONCURRENT=1
-TEAM_MODEL_ID=your_team_model
-MEMORY_MODEL_ID=your_memory_model
-COMPACT_MODEL_ID=your_compact_model
-REPAIR_MODEL_ID=your_repair_model
-MEMORY_MATCH_MODE=keyword
+```powershell
+python -m main.agent.main_loop
 ```
 
-## Memory API
+## Mobile Access
 
-The WebChannel exposes authenticated memory management endpoints: `GET /memory/messages?date=YYYY-MM-DD`, `GET /memory/daily`, `GET /memory/long-term`, and `GET /memory/export`; use `POST /memory/redact` and `POST /memory/long-term/action` for explicit user-approved changes.
+For local use, open the LAN URL printed by the Web Client. For remote access, deploy the Cloudflare Worker in `main/client/worker` and configure independent, high-entropy values for `ANIYAAGENT_WORKER_URL` and `ANIYAAGENT_SESSION_ID`.
 
 ## Security
 
-Keep real credentials in `main/.env`; do not commit them.
-
-The mobile client is intended for personal use. Use a long random session id for remote relay mode and do not expose it as a public multi-user service without authentication, authorization, audit logs, and stronger sandboxing.
+`main/.env` contains model credentials and access tokens; never commit it. AniyaAgent is intended for private personal use. A multi-user deployment needs its own authentication, authorization, audit trail, and stronger execution isolation.
 
 ## License
 

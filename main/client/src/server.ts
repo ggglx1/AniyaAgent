@@ -73,6 +73,8 @@ const runWebPath = resolve(repoRoot, 'main/channel/run_web.py');
 const port = Number(process.env.ANIYAAGENT_CLIENT_PORT || process.env.PORT || 9527);
 const webChannelPort = Number(process.env.ANIYAAGENT_WEB_CHANNEL_PORT || 9528);
 const webChannelUrl = String(process.env.ANIYAAGENT_WEB_CHANNEL_URL || `http://127.0.0.1:${webChannelPort}`).replace(/\/$/, '');
+const ownerToken = String(process.env.ANIYAAGENT_OWNER_TOKEN || '');
+const ownerCookieName = 'aniya_owner_session';
 const conversationId = 'personal';
 const defaultCondaPython = resolve(process.env.USERPROFILE || '', 'anaconda3/envs/claude/python.exe');
 const fallbackCondaPython = resolve(process.env.USERPROFILE || '', 'anaconda3/envs/Claude/python.exe');
@@ -97,23 +99,24 @@ const mimeTypes: Record<string, string> = {
 };
 
 const clients = new Set<WebSocket>();
+let activeOwner: WebSocket | null = null;
 let latestStatus = 'starting';
 
 function sendJson(ws: WebSocket, message: ServerMessage): void {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
 }
 
-function broadcast(message: ServerMessage): void {
-  for (const client of clients) sendJson(client, message);
+function sendToOwner(message: ServerMessage): void {
+  if (activeOwner) sendJson(activeOwner, message);
 }
 
 function setStatus(status: string): void {
   latestStatus = status;
-  broadcast({ type: 'agent.status', data: { status } });
+  sendToOwner({ type: 'agent.status', data: { status } });
 }
 
 function output(role: 'assistant' | 'log' | 'error', content: string): void {
-  if (content.trim()) broadcast({ type: 'agent.output', data: { role, content } });
+  if (content.trim()) sendToOwner({ type: 'agent.output', data: { role, content } });
 }
 
 function clientId(): string {
@@ -131,6 +134,10 @@ function localUrls(): string[] {
 }
 
 function serveStatic(req: IncomingMessage, res: ServerResponse): void {
+  if (!isOwner(req)) {
+    serveLogin(res);
+    return;
+  }
   const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
   let pathname = decodeURIComponent(url.pathname);
   if (pathname === '/') pathname = '/index.html';
@@ -157,6 +164,33 @@ function serveStatic(req: IncomingMessage, res: ServerResponse): void {
     'cache-control': file.endsWith('index.html') ? 'no-store' : 'public, max-age=60',
   });
   createReadStream(file).pipe(res);
+}
+
+function isOwner(req: IncomingMessage): boolean {
+  const cookie = String(req.headers.cookie || '').split(';').map((value) => value.trim())
+    .find((value) => value.startsWith(`${ownerCookieName}=`));
+  return Boolean(ownerToken && cookie?.slice(ownerCookieName.length + 1) === ownerToken);
+}
+
+function serveLogin(res: ServerResponse): void {
+  const body = `<!doctype html><html><body><form method="post" action="/auth"><label>Owner token <input name="token" type="password" autofocus></label><button>Open Aniya</button></form></body></html>`;
+  res.writeHead(401, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+  res.end(body);
+}
+
+function handleAuth(req: IncomingMessage, res: ServerResponse): void {
+  let raw = '';
+  req.on('data', (chunk) => { raw += String(chunk); });
+  req.on('end', () => {
+    const token = new URLSearchParams(raw).get('token') || '';
+    if (!ownerToken || token !== ownerToken) {
+      serveLogin(res);
+      return;
+    }
+    const secure = String(req.headers['x-forwarded-proto'] || '').includes('https') ? '; Secure' : '';
+    res.writeHead(303, { location: '/', 'set-cookie': `${ownerCookieName}=${ownerToken}; HttpOnly; SameSite=Strict; Path=/${secure}` });
+    res.end();
+  });
 }
 
 class WebChannelBridge {
@@ -195,7 +229,7 @@ class WebChannelBridge {
     const response = await fetch(`${webChannelUrl}/channels`);
     if (!response.ok) throw new Error(`GET /channels failed: ${response.status}`);
     const payload = await response.json() as { channels?: ChannelInfo[] };
-    broadcast({ type: 'channels.list', data: { channels: payload.channels || [] } });
+    sendToOwner({ type: 'channels.list', data: { channels: payload.channels || [] } });
   }
 
   async listModels(): Promise<ModelProvidersPayload> {
@@ -330,7 +364,7 @@ class WebChannelBridge {
         output('error', `Tool blocked: ${toolName(event)}`);
         return false;
       case 'permission_request':
-        broadcast({
+        sendToOwner({
           type: 'agent.permission',
           data: {
             requestId: String(event.request_id || ''),
@@ -389,7 +423,13 @@ void bridge.start().catch((error: unknown) => {
   output('error', error instanceof Error ? error.message : String(error));
 });
 
-const server = createServer(serveStatic);
+const server = createServer((req, res) => {
+  if (req.method === 'POST' && req.url === '/auth') {
+    handleAuth(req, res);
+    return;
+  }
+  serveStatic(req, res);
+});
 const wss = new WebSocketServer({ noServer: true });
 
 wss.on('connection', (ws) => {
@@ -406,7 +446,7 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    void handleClientMessage(message).catch((error: unknown) => {
+    void handleClientMessage(message, ws).catch((error: unknown) => {
       if (message.type.startsWith('models.')) {
         sendJson(ws, {
           type: 'models.error',
@@ -419,19 +459,25 @@ wss.on('connection', (ws) => {
     });
   });
 
-  ws.on('close', () => clients.delete(ws));
-  ws.on('error', () => clients.delete(ws));
+  ws.on('close', () => { clients.delete(ws); if (activeOwner === ws) activeOwner = null; });
+  ws.on('error', () => { clients.delete(ws); if (activeOwner === ws) activeOwner = null; });
 });
 
-async function handleClientMessage(message: ClientMessage): Promise<void> {
+async function handleClientMessage(message: ClientMessage, owner: WebSocket): Promise<void> {
   if (message.type === 'connection.ping') {
-    broadcast({ type: 'agent.status', data: { status: latestStatus } });
+    sendJson(owner, { type: 'agent.status', data: { status: latestStatus } });
     return;
   }
 
   if (message.type === 'agent.send') {
     const content = String(message.data?.content || '').trim();
-    if (content) await bridge.send(content);
+    if (content) {
+      if (activeOwner && activeOwner !== owner && latestStatus === 'busy') {
+        throw new Error('Another authenticated device is currently running a request.');
+      }
+      activeOwner = owner;
+      await bridge.send(content);
+    }
     return;
   }
 
@@ -441,17 +487,18 @@ async function handleClientMessage(message: ClientMessage): Promise<void> {
   }
 
   if (message.type === 'models.list') {
-    broadcast({ type: 'models.list', data: await bridge.listModels() });
+    sendJson(owner, { type: 'models.list', data: await bridge.listModels() });
     return;
   }
 
   if (message.type === 'models.select') {
     const provider = String(message.data?.provider || '').trim();
-    if (provider) broadcast({ type: 'models.list', data: await bridge.selectModel(provider) });
+    if (provider) sendJson(owner, { type: 'models.list', data: await bridge.selectModel(provider) });
     return;
   }
 
   if (message.type === 'agent.permission') {
+    if (activeOwner !== owner) throw new Error('This permission request belongs to another device session.');
     const requestId = String(message.data?.requestId || '');
     if (requestId) await bridge.answerPermission(requestId, Boolean(message.data?.allow));
   }
@@ -459,12 +506,16 @@ async function handleClientMessage(message: ClientMessage): Promise<void> {
 
 server.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
-  if (url.pathname !== '/ws') {
+  if (url.pathname !== '/ws' || !isOwner(req)) {
     socket.destroy();
     return;
   }
   wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
 });
+
+if (!ownerToken || ownerToken.startsWith('replace_') || ownerToken.length < 32) {
+  throw new Error('ANIYAAGENT_OWNER_TOKEN is required. Refusing to start a private assistant without owner authentication.');
+}
 
 server.listen(port, '0.0.0.0', () => {
   console.log('AniyaAgent Web UI is running:');

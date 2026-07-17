@@ -143,7 +143,6 @@ agent_teams = AgentTeams(
     task_system=task_system,
     worktree_manager=worktree_manager,
 )
-cron_scheduler.start()
 prompt_builder: Prompt = SystemPrompt(
     WORKDIR,
     skills,
@@ -491,6 +490,7 @@ tools = Tools(
     routine_dispatcher=routine_dispatcher,
     conversation_memory=conversation_memory,
     legacy_memory_migration=legacy_memory_migration if memory_config.allow_legacy_migration else None,
+    capability_profile="personal_assistant",
 )
 
 
@@ -634,13 +634,17 @@ def handle_channel_message(message: ChannelMessage, deliver: bool = True, event_
     return get_channel_runtime().handle_message(message, deliver=deliver, event_callback=event_callback)
 
 
-start_cron_delivery_loop()
-reminder_dispatcher.start()
-routine_dispatcher.start()
-memory_maintenance.start()
+def start_background_services() -> None:
+    """Explicit scheduler-process ownership; importing the composition module has no side effects."""
+    cron_scheduler.start()
+    start_cron_delivery_loop()
+    reminder_dispatcher.start()
+    routine_dispatcher.start()
+    memory_maintenance.start()
 
 
 if __name__ == "__main__":
+    start_background_services()
     print("AniyaAgent: Agent Loop")
     print(f"Model: {get_settings().model}")
     print("Type a task and press Enter. Type q to quit.\n")

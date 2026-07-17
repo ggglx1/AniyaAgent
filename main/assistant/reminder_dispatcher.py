@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 from main.channel.base import AgentResponse
 from main.personal.scheduling import CronSchedule
+from main.notifications import NotificationOutbox
 
 from .proactive_engine import ProactiveEngine
 
@@ -19,6 +20,8 @@ class ReminderDispatcher:
         self.channel_registry = channel_registry
         self.interval_seconds = max(1, interval_seconds)
         self.outbox = self.workdir / ".personal" / "notification_outbox.jsonl"
+        self.delivery_outbox = NotificationOutbox(self.workdir)
+        self.worker_id = f"reminder-dispatcher-{uuid.uuid4().hex[:8]}"
         self.engine = ProactiveEngine()
         self.started = False
         self.stop_event = threading.Event()
@@ -48,6 +51,7 @@ class ReminderDispatcher:
         local_now = current.astimezone(ZoneInfo(profile.get("timezone") or "Asia/Shanghai"))
         quiet_start, quiet_end = self.quiet_hours(profile.get("quiet_hours") or {})
         delivered = 0
+        delivered += self.flush_outbox(current)
         for reminder in self.state.due_reminders(self.iso(current)):
             decision = self.engine.decide(
                 local_now,
@@ -61,44 +65,33 @@ class ReminderDispatcher:
         return delivered
 
     def deliver(self, reminder, delivered_at: datetime) -> bool:
-        response = AgentResponse(
-            channel_id=reminder.target_channel,
-            conversation_id=reminder.user_id,
-            run_id=f"reminder_{uuid.uuid4().hex[:12]}",
-            status="notification",
-            text=f"提醒：{reminder.content}",
-            metadata={"reminder_id": reminder.id, "kind": "personal_reminder"},
+        occurrence = reminder.snoozed_until or reminder.scheduled_at
+        self.delivery_outbox.enqueue(
+            reminder.id, reminder.target_channel, reminder.user_id,
+            {"text": f"提醒：{reminder.content}", "recurrence": reminder.recurrence, "scheduled_at": occurrence}, occurrence,
         )
-        result = self.channel_registry.send(response)
-        self.append_outbox({
-            "event": "reminder.delivery", "reminder_id": reminder.id,
-            "channel": reminder.target_channel, "ok": result.ok,
-            "message": result.message, "created_at": self.iso(delivered_at),
-        })
-        if not result.ok:
-            self.state.update_reminder(
-                reminder.id,
-                {"status": "failed", "delivery_result": result.message},
-                source="dispatcher",
-            )
-            return False
+        return self.flush_outbox(delivered_at) > 0
 
-        changes = {
-            "last_delivered_at": self.iso(delivered_at),
-            "snoozed_until": "",
-            "delivery_result": result.message,
-        }
-        if reminder.recurrence:
-            changes.update({
-                "status": "scheduled",
-                "scheduled_at": CronSchedule.next_after(
-                    reminder.recurrence, delivered_at, reminder.timezone,
-                ),
-            })
-        else:
-            changes["status"] = "delivered"
-        self.state.update_reminder(reminder.id, changes, source="dispatcher")
-        return True
+    def flush_outbox(self, delivered_at: datetime) -> int:
+        delivered = 0
+        for item in self.delivery_outbox.claim(self.worker_id):
+            payload = json.loads(item["payload_json"])
+            response = AgentResponse(channel_id=item["channel_id"], conversation_id=item["recipient_id"], run_id=f"reminder_{uuid.uuid4().hex[:12]}", status="notification", text=str(payload["text"]), metadata={"reminder_id": item["reminder_id"], "outbox_id": item["id"]})
+            result = self.channel_registry.send(response)
+            self.append_outbox({"event": "reminder.delivery", "reminder_id": item["reminder_id"], "channel": item["channel_id"], "ok": result.ok, "message": result.message, "created_at": self.iso(delivered_at), "outbox_id": item["id"]})
+            if not result.ok:
+                self.delivery_outbox.complete(item["id"], False, result.message)
+                continue
+            self.delivery_outbox.complete(item["id"], True)
+            reminder = self.state.require_reminder(item["reminder_id"])
+            changes = {"last_delivered_at": self.iso(delivered_at), "snoozed_until": "", "delivery_result": result.message}
+            if reminder.recurrence:
+                changes.update({"status": "scheduled", "scheduled_at": CronSchedule.next_after(reminder.recurrence, delivered_at, reminder.timezone)})
+            else:
+                changes["status"] = "delivered"
+            self.state.update_reminder(reminder.id, changes, source="dispatcher")
+            delivered += 1
+        return delivered
 
     def quiet_hours(self, value: dict) -> tuple[clock_time | None, clock_time | None]:
         try:

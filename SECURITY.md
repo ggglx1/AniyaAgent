@@ -10,6 +10,7 @@ Use `main/.env` for local credentials:
 ANTHROPIC_API_KEY=your_api_key_here
 MODEL_ID=your_model_id_here
 ANTHROPIC_BASE_URL=https://api.anthropic.com
+ANIYAAGENT_OWNER_TOKEN=use_a_long_random_value_at_least_32_characters
 ```
 
 `main/.env` is ignored by Git. `main/.env.example` is safe to commit because it contains placeholders only.
@@ -25,6 +26,6 @@ git grep -n "sk-[A-Za-z0-9_-]\{20,\}" HEAD -- .
 
 If any real key appears in current files or Git history, revoke or rotate it before publishing.
 
-## Known Limitation
+## Private Web Access
 
-This is a learning project. Tool execution, shell commands, and file access are intentionally simplified and should not be treated as production-grade sandboxing.
+The Web service refuses to start without `ANIYAAGENT_OWNER_TOKEN`. The token creates an HttpOnly owner session before static pages or WebSocket connections are served. Keep the service behind a private network or Cloudflare Access for remote deployment.

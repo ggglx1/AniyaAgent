@@ -12,12 +12,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from main.agent import main_loop as MainLoop  # noqa: E402
+from main.application import create_application  # noqa: E402
 from main.channel.web import WebChannel  # noqa: E402
 from main.conversation import MemoryAdminService  # noqa: E402
 
 
 def main() -> None:
+    app = create_application()
     parser = argparse.ArgumentParser(description="Run AniyaAgent WebChannel HTTP/SSE server.")
     parser.add_argument("--host", default=os.environ.get("ANIYAAGENT_WEB_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("ANIYAAGENT_WEB_PORT", "9528")))
@@ -25,15 +26,15 @@ def main() -> None:
     args = parser.parse_args()
 
     channel = WebChannel(
-        MainLoop.get_channel_runtime(),
+        app.web_runtime(),
         host=args.host,
         port=args.port,
         auth_token=args.token,
-        llm_control=MainLoop.client,
-        memory_admin=MemoryAdminService(MainLoop.conversation_memory, MainLoop.personal_memory_manager),
+        llm_control=app.runtime.client,
+        memory_admin=MemoryAdminService(*app.memory_admin_dependencies),
     )
-    MainLoop.channel_registry.register(channel)
-    MainLoop.permissions.ask_user = channel.ask_user
+    app.runtime.channel_registry.register(channel)
+    app.runtime.permissions.ask_user = channel.ask_user
 
     print(f"AniyaAgent WebChannel listening on http://{args.host}:{args.port}")
     print("POST /message then GET /stream?request_id=... for SSE updates.")
