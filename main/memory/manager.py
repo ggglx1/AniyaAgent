@@ -14,6 +14,7 @@ from .models import (
 )
 from .repository import MemoryRepository
 from .workspace_sync import MemoryWorkspaceSync
+from .scopes import MemoryScopePolicy
 
 
 class PersonalMemoryManager:
@@ -179,6 +180,20 @@ class PersonalMemoryManager:
         for item in candidates:
             created.append(self.add(user_id=user_id, **item))
         return created
+
+    def add_scoped(self, content: str, scope: str, *, allowed_modes: list[str] | None = None, repository_id: str = "", **kwargs) -> MemoryRecord:
+        """Store stable facts with explicit visibility instead of relying on prompt conventions."""
+        allowed = allowed_modes or (["assistant", "coding"] if scope == MemoryScopePolicy.GLOBAL_PERSONAL else ["assistant"])
+        return self.add(content, metadata={**dict(kwargs.pop("metadata", {}) or {}), "scope": scope, "allowed_modes": allowed, "repository_id": repository_id}, **kwargs)
+
+    def list_visible(self, mode: str, *, repository_id: str = "", user_id: str = "local", limit: int = 100) -> list[MemoryRecord]:
+        visible = []
+        for record in self.list(user_id=user_id, status="active", limit=500):
+            meta = record.metadata or {}; scope = str(meta.get("scope") or MemoryScopePolicy.GLOBAL_PERSONAL)
+            modes = set(meta.get("allowed_modes") or [])
+            if (not modes or mode in modes) and MemoryScopePolicy.allowed(scope, mode, repository_id): visible.append(record)
+            if len(visible) >= limit: break
+        return visible
 
     def list(
         self,

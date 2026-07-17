@@ -17,6 +17,31 @@ class MemoryAdminService:
         records = self.conversation.repository.messages_for_day(local_date, include_redacted=True) if local_date else self.conversation.repository.recent_messages(limit)
         return [{**item.to_dict(), "attachments": self.conversation.repository.attachments(item.message_id)} for item in records]
 
+    def track_messages(
+        self,
+        *,
+        mode: str,
+        scope_id: str,
+        track_id: str,
+        limit: int = 50,
+        before_sequence: int | None = None,
+    ) -> list[dict]:
+        records = self.conversation.repository.track_history(
+            mode=mode,
+            scope_id=scope_id,
+            track_id=track_id,
+            limit=limit,
+            before_sequence=before_sequence,
+            include_redacted=True,
+        )
+        return [
+            {
+                **item.to_dict(),
+                "attachments": self.conversation.repository.attachments(item.message_id),
+            }
+            for item in records
+        ]
+
     def daily_memory(self, local_date: str = "") -> dict | None:
         return self.conversation.repository.day(local_date) if local_date else self.conversation.repository.latest_daily_memory()
 
@@ -24,7 +49,10 @@ class MemoryAdminService:
         return self.conversation.repository.list_days(limit)
 
     def long_term_memories(self, status: str = "", limit: int = 100) -> list[dict]:
-        return [record.to_dict() for record in self.personal_memory.list(status=status, limit=limit)]
+        return [
+            {**record.to_dict(), "source_message_ids": self.sources_for_memory(record.id)}
+            for record in self.personal_memory.list(status=status, limit=limit)
+        ]
 
     def sources_for_memory(self, memory_id: str) -> list[str]:
         with self.conversation.repository.connect() as connection:

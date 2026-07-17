@@ -4,8 +4,9 @@ import json
 import sqlite3
 import threading
 import uuid
+import shutil
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -100,6 +101,121 @@ class ConversationMemoryRepository:
             self.ensure_column(connection, "conversation_days", "generated_at", "TEXT NOT NULL DEFAULT ''")
             self.ensure_column(connection, "conversation_days", "input_fingerprint", "TEXT NOT NULL DEFAULT ''")
             self.ensure_column(connection, "conversation_days", "daily_memory_error", "TEXT NOT NULL DEFAULT ''")
+            self.initialize_v2(connection)
+
+    def initialize_v2(self, connection) -> None:
+        """Versioned, additive migration for the three product conversation tracks.
+
+        Legacy tables stay intact so a partially upgraded local database can always be
+        opened again. New code uses the v2 tables and old personal data is copied once.
+        """
+        connection.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL, details TEXT NOT NULL DEFAULT '')")
+        version = connection.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()[0]
+        if version >= 2:
+            return
+        backup = self.db_path.with_suffix(".pre_track_v2.db")
+        if not backup.exists() and self.db_path.exists():
+            # WAL is committed by this point; the backup is an operator rollback point.
+            connection.commit()
+            shutil.copy2(self.db_path, backup)
+        connection.executescript("""
+            CREATE TABLE IF NOT EXISTS conversation_tracks (
+                owner_id TEXT NOT NULL, mode TEXT NOT NULL, scope_id TEXT NOT NULL, track_id TEXT NOT NULL,
+                repository_id TEXT NOT NULL DEFAULT '', work_session_id TEXT NOT NULL DEFAULT '', topic_id TEXT NOT NULL DEFAULT '',
+                retention_class TEXT NOT NULL DEFAULT 'long_term', expires_at TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                PRIMARY KEY(owner_id, mode, scope_id, track_id)
+            );
+            CREATE TABLE IF NOT EXISTS conversation_track_days (
+                owner_id TEXT NOT NULL, mode TEXT NOT NULL, scope_id TEXT NOT NULL, track_id TEXT NOT NULL,
+                local_date TEXT NOT NULL, timezone_at_creation TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                PRIMARY KEY(owner_id, mode, scope_id, track_id, local_date)
+            );
+            CREATE TABLE IF NOT EXISTS conversation_track_messages (
+                message_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, mode TEXT NOT NULL, scope_id TEXT NOT NULL,
+                track_id TEXT NOT NULL, repository_id TEXT NOT NULL DEFAULT '', work_session_id TEXT NOT NULL DEFAULT '',
+                topic_id TEXT NOT NULL DEFAULT '', day_date TEXT NOT NULL, sequence INTEGER NOT NULL, track_sequence INTEGER NOT NULL,
+                role TEXT NOT NULL, content_json TEXT NOT NULL, channel TEXT NOT NULL, timezone_at_write TEXT NOT NULL,
+                created_at TEXT NOT NULL, reply_to_message_id TEXT NOT NULL DEFAULT '', metadata_json TEXT NOT NULL DEFAULT '{}',
+                retention_class TEXT NOT NULL DEFAULT 'long_term', expires_at TEXT NOT NULL DEFAULT '', redacted_at TEXT NOT NULL DEFAULT ''
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_track_messages_sequence ON conversation_track_messages(sequence);
+            CREATE INDEX IF NOT EXISTS idx_track_messages_history ON conversation_track_messages(owner_id, mode, scope_id, track_id, track_sequence);
+            CREATE INDEX IF NOT EXISTS idx_track_messages_expiry ON conversation_track_messages(expires_at);
+            CREATE TABLE IF NOT EXISTS maintenance_requests (
+                id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload_json TEXT NOT NULL DEFAULT '{}', state TEXT NOT NULL DEFAULT 'pending',
+                worker_id TEXT NOT NULL DEFAULT '', claim_token TEXT NOT NULL DEFAULT '', lease_expires_at TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_maintenance_claim ON maintenance_requests(state, lease_expires_at, created_at);
+        """)
+        now = datetime.now().astimezone().isoformat()
+        rows = connection.execute("SELECT * FROM conversation_messages ORDER BY seq").fetchall()
+        for row in rows:
+            connection.execute("INSERT OR IGNORE INTO conversation_tracks(owner_id, mode, scope_id, track_id, created_at, updated_at) VALUES ('local','assistant','personal','assistant:personal',?,?)", (now, now))
+            connection.execute("INSERT OR IGNORE INTO conversation_track_days(owner_id,mode,scope_id,track_id,local_date,timezone_at_creation,created_at,updated_at) VALUES ('local','assistant','personal','assistant:personal',?,?,?,?)", (row['day_date'], row['timezone_at_write'], row['created_at'], now))
+            connection.execute("""INSERT OR IGNORE INTO conversation_track_messages(message_id,owner_id,mode,scope_id,track_id,day_date,sequence,track_sequence,role,content_json,channel,timezone_at_write,created_at,reply_to_message_id,metadata_json,redacted_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (row['message_id'], 'local', 'assistant', 'personal', 'assistant:personal', row['day_date'], row['seq'], row['seq'], row['role'], row['content_json'], row['channel'], row['timezone_at_write'], row['created_at'], row['reply_to_message_id'], row['metadata_json'], row['redacted_at']))
+        connection.execute("INSERT OR REPLACE INTO schema_migrations(version, applied_at, details) VALUES (2, ?, ?)", (now, 'three-track factual memory; legacy data copied to assistant:personal'))
+
+    def append_track_message(self, role: str, content: object, *, mode: str = 'assistant', scope_id: str = 'personal', track_id: str = 'assistant:personal', owner_id: str = 'local', repository_id: str = '', work_session_id: str = '', topic_id: str = '', channel: str = 'web', timezone_name: str = 'Asia/Shanghai', reply_to_message_id: str = '', metadata: dict | None = None, retention_class: str = 'long_term', expires_at: str = '') -> ConversationMessage:
+        if role not in {'user', 'assistant', 'tool', 'system'}:
+            raise ValueError(f'Unsupported factual message role: {role}')
+        now = datetime.now(ZoneInfo(timezone_name)); date = now.date().isoformat(); created_at = now.isoformat()
+        with self.lock, self.connect() as connection:
+            connection.execute("INSERT OR IGNORE INTO conversation_tracks(owner_id,mode,scope_id,track_id,repository_id,work_session_id,topic_id,retention_class,expires_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)", (owner_id,mode,scope_id,track_id,repository_id,work_session_id,topic_id,retention_class,expires_at,created_at,created_at))
+            connection.execute("INSERT OR IGNORE INTO conversation_track_days(owner_id,mode,scope_id,track_id,local_date,timezone_at_creation,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)", (owner_id,mode,scope_id,track_id,date,timezone_name,created_at,created_at))
+            sequence = int(connection.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM conversation_track_messages").fetchone()[0])
+            track_sequence = int(connection.execute("SELECT COALESCE(MAX(track_sequence),0)+1 FROM conversation_track_messages WHERE owner_id=? AND mode=? AND scope_id=? AND track_id=?", (owner_id,mode,scope_id,track_id)).fetchone()[0])
+            message = ConversationMessage(f'msg_{uuid.uuid4().hex[:16]}', date, sequence, role, self.normalize(content), channel, timezone_name, created_at, reply_to_message_id, metadata or {}, '', owner_id, mode, scope_id, track_id, repository_id, work_session_id, topic_id, retention_class, expires_at, track_sequence)
+            connection.execute("""INSERT INTO conversation_track_messages(message_id,owner_id,mode,scope_id,track_id,repository_id,work_session_id,topic_id,day_date,sequence,track_sequence,role,content_json,channel,timezone_at_write,created_at,reply_to_message_id,metadata_json,retention_class,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (message.message_id,owner_id,mode,scope_id,track_id,repository_id,work_session_id,topic_id,date,sequence,track_sequence,role,json.dumps(message.content,ensure_ascii=False),channel,timezone_name,created_at,reply_to_message_id,json.dumps(message.metadata,ensure_ascii=False),retention_class,expires_at))
+        return message
+
+    def track_history(self, *, mode: str, scope_id: str, track_id: str, owner_id: str = 'local', limit: int = 50, before_sequence: int | None = None, include_redacted: bool = False) -> list[ConversationMessage]:
+        conditions = ['owner_id=?','mode=?','scope_id=?','track_id=?']; args = [owner_id, mode, scope_id, track_id]
+        if not include_redacted: conditions.append("redacted_at='' ")
+        if before_sequence is not None: conditions.append('track_sequence<?'); args.append(before_sequence)
+        args.append(max(1, min(limit, 500)))
+        with self.connect() as connection:
+            rows = connection.execute(f"SELECT * FROM conversation_track_messages WHERE {' AND '.join(conditions)} ORDER BY track_sequence DESC LIMIT ?", args).fetchall()
+        return [self.to_track_message(row) for row in reversed(rows)]
+
+    def list_tracks(self, owner_id: str = 'local', mode: str = '') -> list[dict]:
+        sql = 'SELECT * FROM conversation_tracks WHERE owner_id=?'; args = [owner_id]
+        if mode: sql += ' AND mode=?'; args.append(mode)
+        with self.connect() as connection: rows = connection.execute(sql + ' ORDER BY updated_at DESC', args).fetchall()
+        return [dict(row) for row in rows]
+
+    def expire_track_messages(self, now: str) -> int:
+        with self.lock, self.connect() as connection:
+            return connection.execute("UPDATE conversation_track_messages SET content_json='{\"redacted\":true,\"reason\":\"retention_expired\"}', redacted_at=? WHERE expires_at<>'' AND expires_at<=? AND redacted_at=''", (now, now)).rowcount
+
+    def request_maintenance(self, kind: str, payload: dict | None = None) -> str:
+        now = datetime.now(timezone.utc).isoformat().replace('+00:00','Z'); request_id = f'maint_{uuid.uuid4().hex[:16]}'
+        with self.lock, self.connect() as connection:
+            connection.execute("INSERT INTO maintenance_requests(id,kind,payload_json,created_at,updated_at) VALUES (?,?,?,?,?)", (request_id,kind,json.dumps(payload or {},ensure_ascii=False),now,now))
+        return request_id
+
+    def claim_maintenance(self, worker_id: str, limit: int = 10, lease_seconds: int = 120) -> list[dict]:
+        now = datetime.now(timezone.utc); now_s=now.isoformat().replace('+00:00','Z'); until=(now+__import__('datetime').timedelta(seconds=lease_seconds)).isoformat().replace('+00:00','Z'); claimed=[]
+        with self.lock, self.connect() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            connection.execute("UPDATE maintenance_requests SET state='pending',worker_id='',claim_token='',lease_expires_at='' WHERE state='claimed' AND lease_expires_at<?", (now_s,))
+            rows=connection.execute("SELECT * FROM maintenance_requests WHERE state='pending' ORDER BY created_at LIMIT ?", (limit,)).fetchall()
+            for row in rows:
+                token=uuid.uuid4().hex
+                if connection.execute("UPDATE maintenance_requests SET state='claimed',worker_id=?,claim_token=?,lease_expires_at=?,updated_at=? WHERE id=? AND state='pending'", (worker_id,token,until,now_s,row['id'])).rowcount:
+                    item=dict(row); item['claim_token']=token; claimed.append(item)
+            connection.execute('COMMIT')
+        return claimed
+
+    def complete_maintenance(self, request_id: str, claim_token: str, error: str = '') -> bool:
+        now=datetime.now(timezone.utc).isoformat().replace('+00:00','Z'); state='failed' if error else 'completed'
+        with self.lock, self.connect() as connection:
+            return bool(connection.execute("UPDATE maintenance_requests SET state=?,updated_at=?,completed_at=?,lease_expires_at='' WHERE id=? AND state='claimed' AND claim_token=?", (state,now,now,request_id,claim_token)).rowcount)
+
+    def to_track_message(self, row) -> ConversationMessage:
+        return ConversationMessage(row['message_id'],row['day_date'],row['sequence'],row['role'],json.loads(row['content_json']),row['channel'],row['timezone_at_write'],row['created_at'],row['reply_to_message_id'],json.loads(row['metadata_json']),row['redacted_at'],row['owner_id'],row['mode'],row['scope_id'],row['track_id'],row['repository_id'],row['work_session_id'],row['topic_id'],row['retention_class'],row['expires_at'],row['track_sequence'])
 
     def append_message(
         self, role: str, content: object, *, channel: str = "web", timezone_name: str = "Asia/Shanghai",
@@ -129,6 +245,9 @@ class ConversationMemoryRepository:
                  reply_to_message_id, json.dumps(message.metadata, ensure_ascii=False)),
             )
             connection.execute("UPDATE conversation_days SET updated_at=? WHERE local_date=?", (created_at, local_date))
+        # Keep legacy callers and the new three-track archive in sync during migration.
+        self.append_track_message(role, content, channel=channel, timezone_name=timezone_name,
+                                  reply_to_message_id=reply_to_message_id, metadata=metadata)
         return message
 
     def recent_messages(self, limit: int = 12) -> list[ConversationMessage]:
@@ -224,10 +343,36 @@ class ConversationMemoryRepository:
         now = datetime.now().astimezone().isoformat()
         with self.lock, self.connect() as connection:
             row = connection.execute("SELECT day_date FROM conversation_messages WHERE message_id=?", (message_id,)).fetchone()
-            if not row:
+            track_row = connection.execute(
+                "SELECT day_date, mode, track_id FROM conversation_track_messages WHERE message_id=?",
+                (message_id,),
+            ).fetchone()
+            if not row and not track_row:
                 raise FileNotFoundError(f"Conversation message not found: {message_id}")
-            connection.execute("UPDATE conversation_messages SET content_json=?, redacted_at=? WHERE message_id=?", ('{"redacted": true}', now, message_id))
-            connection.execute("UPDATE conversation_days SET daily_memory_status='needs_rebuild', updated_at=? WHERE local_date=?", (now, row["day_date"]))
+            if row:
+                connection.execute("UPDATE conversation_messages SET content_json=?, redacted_at=? WHERE message_id=?", ('{"redacted": true}', now, message_id))
+                connection.execute("UPDATE conversation_days SET daily_memory_status='needs_rebuild', updated_at=? WHERE local_date=?", (now, row["day_date"]))
+            if track_row:
+                connection.execute(
+                    "UPDATE conversation_track_messages SET content_json=?, redacted_at=? WHERE message_id=?",
+                    ('{"redacted": true}', now, message_id),
+                )
+                if track_row["mode"] == "assistant":
+                    connection.execute(
+                        "UPDATE conversation_days SET daily_memory_status='needs_rebuild', updated_at=? WHERE local_date=?",
+                        (now, track_row["day_date"]),
+                    )
+                else:
+                    connection.execute(
+                        "INSERT INTO maintenance_requests(id,kind,payload_json,created_at,updated_at) VALUES (?,?,?,?,?)",
+                        (
+                            f"maint_{uuid.uuid4().hex[:16]}",
+                            "conversation_redacted",
+                            json.dumps({"message_id": message_id, "mode": track_row["mode"], "track_id": track_row["track_id"]}, ensure_ascii=False),
+                            now,
+                            now,
+                        ),
+                    )
 
     def linked_long_term_memory_ids(self, message_id: str) -> list[str]:
         with self.connect() as connection:
@@ -258,7 +403,10 @@ class ConversationMemoryRepository:
     def message(self, message_id: str):
         with self.connect() as connection:
             row = connection.execute("SELECT * FROM conversation_messages WHERE message_id=?", (message_id,)).fetchone()
-        return self.to_message(row) if row else None
+            track_row = None if row else connection.execute(
+                "SELECT * FROM conversation_track_messages WHERE message_id=?", (message_id,)
+            ).fetchone()
+        return self.to_message(row) if row else (self.to_track_message(track_row) if track_row else None)
 
     def export(self) -> list[dict]:
         with self.connect() as connection:

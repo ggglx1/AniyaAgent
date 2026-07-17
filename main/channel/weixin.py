@@ -370,8 +370,11 @@ class WeixinChannel:
 
         from_user = str(raw_message.get("from_user_id") or "")
         context_token = str(raw_message.get("context_token") or "")
-        if context_token and from_user:
-            self.update_context_token(from_user, context_token)
+        # A message may refresh a token only for an already verified recipient.
+        if context_token and from_user and self.notification_outbox.binding("local"):
+            binding = self.notification_outbox.binding("local")
+            if binding and binding.get("recipient_id") == from_user:
+                self.update_context_token(from_user, context_token)
 
         text, files, images = parse_message_items(raw_message)
         if not text and (files or images):
@@ -412,8 +415,7 @@ class WeixinChannel:
             creds["base_url"] = self.base_url
             creds["context_tokens"] = dict(self.context_tokens)
             save_credentials(self.credentials_path, creds)
-            # Inbound messages remain notification-only, but establish/refresh the verified delivery binding.
-            self.notification_outbox.bind_owner("local", user_id, context_token)
+            # Never auto-bind arbitrary inbound WeChat users. Binding is an explicit Web/admin action.
 
     def check_send_response(self, receiver: str, response: dict) -> None:
         if response.get("ret") == SESSION_EXPIRED_CODE or response.get("errcode") == SESSION_EXPIRED_CODE:

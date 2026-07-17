@@ -8,6 +8,7 @@ from .context import MemoryContextAssembler
 from .pipeline import StructuredMemoryPipeline
 from .consolidator import MemoryConsolidator
 from .maintenance import MemoryMaintenanceService
+from .scopes import MemoryScopePolicy
 from .migration import LegacyMemoryMigration
 from .legacy_audit import LegacyMemoryAudit
 from .llm_extractor import ControlledLlmMemoryExtractor

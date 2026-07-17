@@ -32,6 +32,7 @@ def main() -> None:
         auth_token=args.token,
         llm_control=app.runtime.client,
         memory_admin=MemoryAdminService(*app.memory_admin_dependencies),
+        application=app,
     )
     app.runtime.channel_registry.register(channel)
     app.runtime.permissions.ask_user = channel.ask_user

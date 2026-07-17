@@ -116,11 +116,8 @@ class AgentRuntime:
             factual_ids: list[str] = []
             if self.is_web_context(channel_context):
                 timezone_name = self.timezone_for_web()
-                if self.memory_maintenance is not None:
-                    self.memory_maintenance.tick()
-                else:
-                    # First Web request on a new day repairs summaries left open on prior days.
-                    self.conversation_memory.rebuild_prior_days(timezone_name)
+                # Web only records facts and dirty work. Scheduler is the sole maintenance owner.
+                self.conversation_memory.repository.request_maintenance("memory_maintenance", {"timezone": timezone_name})
                 factual_ids.append(
                     self.conversation_memory.repository.append_message(
                         "user", user_text, timezone_name=timezone_name, metadata={"channel": "web"}

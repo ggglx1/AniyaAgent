@@ -24,6 +24,7 @@ class WebChannel:
         permission_timeout_seconds: int = 300,
         llm_control=None,
         memory_admin=None,
+        application=None,
     ):
         self.channel_runtime = channel_runtime
         self.channel_id = channel_id
@@ -35,6 +36,7 @@ class WebChannel:
         self.permission_timeout_seconds = permission_timeout_seconds
         self.llm_control = llm_control
         self.memory_admin = memory_admin
+        self.application = application
         self.queues: dict[str, queue.Queue[dict]] = {}
         self.request_sessions: dict[str, str] = {}
         self.conversation_requests: dict[str, str] = {}
@@ -79,8 +81,11 @@ class WebChannel:
         if not text:
             return {"ok": False, "error": "Message text is required."}
 
-        # Desktop and mobile Web are one local user's continuous conversation.
-        conversation_id = "personal"
+        track = self.resolve_track(payload, create=True)
+        if not track["can_send"]:
+            return {"ok": False, "error": track["unavailable_reason"], "track": track}
+
+        conversation_id = "personal" if track["mode"] == "assistant" else track["track_id"]
         user_id = "local"
         request_id = uuid.uuid4().hex
         event_queue: queue.Queue[dict] = queue.Queue()
@@ -90,6 +95,8 @@ class WebChannel:
             self.request_sessions[request_id] = conversation_id
             self.conversation_requests[conversation_id] = request_id
 
+        metadata = dict(payload.get("metadata") or {})
+        metadata.update({key: track[key] for key in ("mode", "scope_id", "track_id", "repository_id", "work_session_id", "topic_id")})
         message = ChannelMessage(
             channel_id=self.channel_id,
             user_id=user_id,
@@ -99,11 +106,11 @@ class WebChannel:
             trust_level=TrustLevel.HIGH,
             files=list(payload.get("files") or []),
             images=list(payload.get("images") or []),
-            metadata=dict(payload.get("metadata") or {}),
+            metadata=metadata,
         )
         threading.Thread(
             target=self._run_request,
-            args=(request_id, message),
+            args=(request_id, message, track),
             daemon=True,
             name=f"web-channel-request-{request_id[:8]}",
         ).start()
@@ -111,7 +118,70 @@ class WebChannel:
             "ok": True,
             "request_id": request_id,
             "conversation_id": conversation_id,
+            "track": track,
             "stream_url": f"/stream?request_id={request_id}",
+        }
+
+    def resolve_track(self, payload: dict[str, Any], create: bool = False, force_new: bool = False) -> dict[str, Any]:
+        mode = str(payload.get("mode") or "assistant").strip().lower()
+        if mode not in {"assistant", "coding", "qa"}:
+            raise ValueError(f"Unsupported conversation mode: {mode}")
+
+        if mode == "assistant":
+            return {
+                "mode": "assistant", "scope_id": "personal", "track_id": "assistant:personal",
+                "repository_id": "", "work_session_id": "", "topic_id": "",
+                "can_send": True, "unavailable_reason": "",
+            }
+
+        if self.application is None:
+            return {
+                "mode": mode, "scope_id": "knowledge" if mode == "qa" else "",
+                "track_id": "", "repository_id": "", "work_session_id": "", "topic_id": "",
+                "can_send": False, "unavailable_reason": "当前 Web 运行时尚未装配该对话轨道。",
+            }
+
+        if mode == "qa":
+            topic_id = str(payload.get("topic_id") or "").strip()
+            if force_new:
+                topic_id = ""
+            if not topic_id:
+                tracks = self.application.repository.list_tracks(mode="qa")
+                if tracks and not force_new:
+                    topic_id = str(tracks[0].get("topic_id") or "")
+                if not topic_id and create:
+                    topic_id = self.application.qa.new_topic()
+            return {
+                "mode": "qa", "scope_id": "knowledge", "track_id": f"qa:{topic_id}" if topic_id else "",
+                "repository_id": "", "work_session_id": "", "topic_id": topic_id,
+                "can_send": bool(topic_id), "unavailable_reason": "无法创建知识问答主题。" if not topic_id else "",
+            }
+
+        repository_root = str(payload.get("repository_root") or self.application.coding.workdir)
+        repository_id = str(payload.get("repository_id") or "").strip()
+        work_session_id = str(payload.get("work_session_id") or "").strip()
+        if not repository_id:
+            repository_id = self.application.coding.repository_id(repository_root)
+        if force_new:
+            work_session_id = ""
+        if not work_session_id:
+            tracks = [
+                item for item in self.application.repository.list_tracks(mode="coding")
+                if str(item.get("repository_id") or "") == repository_id
+            ]
+            if tracks and not force_new:
+                work_session_id = str(tracks[0].get("work_session_id") or "")
+            if not work_session_id and create:
+                created = self.application.coding.new_work_session(repository_root)
+                repository_id = created["repository_id"]
+                work_session_id = created["work_session_id"]
+        track_id = f"coding:{repository_id}:{work_session_id}" if work_session_id else ""
+        can_send = callable(getattr(self.application.coding, "handle", None))
+        return {
+            "mode": "coding", "scope_id": repository_id, "track_id": track_id,
+            "repository_id": repository_id, "work_session_id": work_session_id, "topic_id": "",
+            "can_send": can_send,
+            "unavailable_reason": "Coding 轨道的数据边界已就绪，但 Coding Runtime 尚未接入 Web。" if not can_send else "",
         }
 
     def send(self, response: AgentResponse) -> ChannelSendResult:
@@ -186,15 +256,26 @@ class WebChannel:
                     self.queues.pop(request_id, None)
                 return
 
-    def _run_request(self, request_id: str, message: ChannelMessage) -> None:
+    def _run_request(self, request_id: str, message: ChannelMessage, track: dict[str, Any]) -> None:
         self._local.request_id = request_id
-        self._enqueue(request_id, {"type": "accepted", "request_id": request_id, "conversation_id": message.conversation_id})
+        self._enqueue(request_id, {"type": "accepted", "request_id": request_id, "conversation_id": message.conversation_id, "track": track})
         try:
-            response = self.channel_runtime.handle_message(
-                message,
-                deliver=False,
-                event_callback=lambda event_type, payload: self._on_runtime_event(request_id, event_type, payload),
-            )
+            if track["mode"] == "qa":
+                content = self.application.qa.ask(message.text, track["topic_id"])
+                response = AgentResponse(self.channel_id, message.conversation_id, request_id, "completed", content)
+            elif track["mode"] == "coding":
+                response = self.application.coding.handle(
+                    message.text,
+                    repository_id=track["repository_id"],
+                    work_session_id=track["work_session_id"],
+                    event_callback=lambda event_type, payload: self._on_runtime_event(request_id, event_type, payload),
+                )
+            else:
+                response = self.channel_runtime.handle_message(
+                    message,
+                    deliver=False,
+                    event_callback=lambda event_type, payload: self._on_runtime_event(request_id, event_type, payload),
+                )
             self._enqueue(
                 request_id,
                 {
@@ -206,6 +287,7 @@ class WebChannel:
                     "content": response.text,
                     "error": response.error,
                     "metadata": response.metadata,
+                    "track": track,
                 },
             )
         except Exception as exc:
@@ -264,6 +346,36 @@ class WebChannel:
                         return
                     self._send_json({"ok": True, "channels": channel.channel_runtime.registry.list_channels()})
                     return
+                if parsed.path == "/conversation/state":
+                    if not self._authorized():
+                        self._send_json({"ok": False, "error": "Unauthorized"}, status=401)
+                        return
+                    try:
+                        modes = [channel.resolve_track({"mode": mode}, create=True) for mode in ("assistant", "coding", "qa")]
+                    except ValueError as exc:
+                        self._send_json({"ok": False, "error": str(exc)}, status=400)
+                        return
+                    self._send_json({"ok": True, "modes": modes})
+                    return
+                if parsed.path == "/conversation/history":
+                    if not self._authorized() or channel.memory_admin is None:
+                        self._send_json({"ok": False, "error": "Conversation API unavailable"}, status=503)
+                        return
+                    query = parse_qs(parsed.query)
+                    values = {key: items[0] for key, items in query.items() if items}
+                    try:
+                        track = channel.resolve_track(values, create=True)
+                        limit = max(1, min(int(values.get("limit") or "50"), 100))
+                        before = int(values["before_sequence"]) if values.get("before_sequence") else None
+                        records = channel.memory_admin.track_messages(
+                            mode=track["mode"], scope_id=track["scope_id"], track_id=track["track_id"],
+                            limit=limit, before_sequence=before,
+                        )
+                    except (TypeError, ValueError) as exc:
+                        self._send_json({"ok": False, "error": str(exc)}, status=400)
+                        return
+                    self._send_json({"ok": True, "track": track, "messages": records, "has_more": len(records) >= limit})
+                    return
                 if parsed.path == "/llm/providers":
                     if not self._authorized():
                         self._send_json({"ok": False, "error": "Unauthorized"}, status=401)
@@ -321,7 +433,24 @@ class WebChannel:
                     if not self._authorized():
                         self._send_json({"ok": False, "error": "Unauthorized"}, status=401)
                         return
-                    self._send_json(channel.submit_message(self._read_json()))
+                    try:
+                        result = channel.submit_message(self._read_json())
+                    except ValueError as exc:
+                        self._send_json({"ok": False, "error": str(exc)}, status=400)
+                        return
+                    self._send_json(result, status=200 if result.get("ok") else 503)
+                    return
+                if parsed.path == "/conversation/track":
+                    if not self._authorized():
+                        self._send_json({"ok": False, "error": "Unauthorized"}, status=401)
+                        return
+                    payload = self._read_json()
+                    try:
+                        track = channel.resolve_track(payload, create=True, force_new=str(payload.get("action") or "") == "new")
+                    except ValueError as exc:
+                        self._send_json({"ok": False, "error": str(exc)}, status=400)
+                        return
+                    self._send_json({"ok": True, "track": track})
                     return
                 if parsed.path == "/permission":
                     if not self._authorized():
@@ -353,11 +482,11 @@ class WebChannel:
                         return
                     payload = self._read_json()
                     try:
-                        channel.memory_admin.retention.redact(str(payload.get("message_id") or ""))
+                        result = channel.memory_admin.retention.redact(str(payload.get("message_id") or ""))
                     except (ValueError, FileNotFoundError) as exc:
                         self._send_json({"ok": False, "error": str(exc)}, status=400)
                         return
-                    self._send_json({"ok": True})
+                    self._send_json({"ok": True, "result": result})
                     return
                 if parsed.path == "/memory/long-term/action":
                     if not self._authorized() or channel.memory_admin is None:

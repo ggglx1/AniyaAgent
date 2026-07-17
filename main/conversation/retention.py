@@ -31,7 +31,20 @@ class ConversationRetentionService:
                     pass
         runtime_files = ConversationStore(self.repository.workdir).redact_text_everywhere(original_text)
         operational_files = self.redact_operational_artifacts(original_text)
-        return {"message_id": message_id, "runtime_artifacts_redacted": runtime_files, "operational_artifacts_redacted": operational_files, "daily_memory_rebuild": True}
+        return {
+            "message_id": message_id,
+            "stores": {
+                "fact_memory": "redacted",
+                "runtime_artifacts": runtime_files,
+                "operational_artifacts": operational_files,
+                "linked_long_term_memories": linked_memory_ids,
+            },
+            "daily_memory_rebuild": True,
+            "external_limitations": [
+                "已发送的微信通知无法从微信服务端撤回",
+                "模型服务商日志、系统备份和第三方副本不受本地删除控制",
+            ],
+        }
 
     def export(self) -> list[dict]:
         return self.repository.export()

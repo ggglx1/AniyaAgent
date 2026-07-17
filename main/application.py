@@ -1,24 +1,15 @@
 from __future__ import annotations
 
-"""Explicit production composition facade for the private personal-assistant product."""
+"""Compatibility module that also exposes the production application package."""
 
+from pathlib import Path
 
-class PersonalAssistantApplication:
-    def __init__(self):
-        # Kept lazy so importing entry points never starts workers.
-        from main.agent import main_loop
-        self.runtime = main_loop
+# ``application.py`` existed before the package was introduced. Giving this module a
+# package path preserves old imports while allowing the new composition to be modular.
+__path__ = [str(Path(__file__).with_suffix(""))]
 
-    def web_runtime(self):
-        return self.runtime.get_channel_runtime()
+from .application.bootstrap import AniyaApplication, create_application  # noqa: E402
 
-    def start_scheduler(self) -> None:
-        self.runtime.start_background_services()
+PersonalAssistantApplication = AniyaApplication
 
-    @property
-    def memory_admin_dependencies(self):
-        return self.runtime.conversation_memory, self.runtime.personal_memory_manager
-
-
-def create_application() -> PersonalAssistantApplication:
-    return PersonalAssistantApplication()
+__all__ = ["AniyaApplication", "PersonalAssistantApplication", "create_application"]
