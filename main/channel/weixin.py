@@ -382,6 +382,22 @@ class WeixinChannel:
         if not text:
             return None
 
+        binding_code = self.binding_code_from_text(text)
+        if binding_code and from_user and context_token:
+            confirmed = self.notification_outbox.confirm_binding_code(binding_code, from_user, context_token)
+            if confirmed:
+                self.update_context_token(from_user, context_token)
+                response = AgentResponse(
+                    channel_id=self.channel_id,
+                    conversation_id="local",
+                    run_id=f"weixin_binding_{message_id}",
+                    status="notification",
+                    text="微信通知已和你的 Aniya 绑定。之后请回到 Web 继续对话。",
+                    metadata={"inbound_message_id": message_id, "binding_confirmed": True},
+                )
+                self.send(response)
+                return response
+
         # Weixin is notification-only: never route inbound text into the Agent or user memory.
         response = AgentResponse(
             channel_id=self.channel_id,
@@ -393,6 +409,14 @@ class WeixinChannel:
         )
         self.send(response)
         return response
+
+    def binding_code_from_text(self, text: str) -> str:
+        value = text.strip().upper()
+        for prefix in ("绑定 ", "绑定码 ", "BIND "):
+            if value.startswith(prefix):
+                value = value[len(prefix):].strip()
+                break
+        return value if len(value) == 8 and all(char in "0123456789ABCDEF" for char in value) else ""
 
     def is_duplicate(self, message_id: str) -> bool:
         now = time.time()

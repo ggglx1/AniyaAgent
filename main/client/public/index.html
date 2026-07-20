@@ -13,13 +13,8 @@
     <header class="global-nav">
       <div class="nav-inner">
         <div class="brand">
-          <div class="brand-mark" aria-hidden="true">
-            <img src="/assets/aniya-logo.jpg" alt="" />
-          </div>
-          <div class="brand-copy">
-            <strong>Aniya</strong>
-            <span>私人助理</span>
-          </div>
+          <div class="brand-mark" aria-hidden="true"><img src="/assets/aniya-logo.jpg" alt="" /></div>
+          <div class="brand-copy"><strong>Aniya</strong><span>私人助理</span></div>
         </div>
 
         <div class="nav-actions">
@@ -27,48 +22,28 @@
             <span id="dot" class="dot" aria-hidden="true"></span>
             <span id="status">正在醒来</span>
           </div>
-
-          <button id="channels-toggle" class="menu-button" type="button" title="连接与状态" aria-label="连接与状态" aria-expanded="false" aria-controls="channels-popover">
+          <button id="channels-toggle" class="menu-button" type="button" title="更多" aria-label="更多" aria-expanded="false" aria-controls="channels-popover">
             <span aria-hidden="true">•••</span>
           </button>
 
-          <button id="models-toggle" class="model-button" type="button" title="选择模型" aria-label="选择模型" aria-expanded="false" aria-controls="models-popover">
-            <span class="model-button-kicker">模型</span>
-            <span id="active-model" class="model-button-value">加载中</span>
-          </button>
-
-          <section id="models-popover" class="model-popover hidden" aria-labelledby="models-title">
-            <div class="popover-head model-popover-head">
-              <div>
-                <h2 id="models-title">模型</h2>
-                <p id="models-summary">正在读取可用模型</p>
-              </div>
-            </div>
-            <div id="models" class="model-options" aria-live="polite">
-              <div class="model-skeleton"></div>
-              <div class="model-skeleton"></div>
-            </div>
-            <p id="models-feedback" class="model-feedback hidden" role="status"></p>
-          </section>
-
           <section id="channels-popover" class="channel-popover hidden" aria-labelledby="channels-title">
             <div class="popover-head">
-              <div>
-                <h2 id="channels-title">连接状态</h2>
-                <p id="channels-count">正在检查连接</p>
-              </div>
-              <button id="refresh-channels" class="icon-button" type="button" title="刷新连接" aria-label="刷新连接">
-                <span aria-hidden="true">↻</span>
-              </button>
+              <div><h2 id="channels-title">在你身边</h2><p id="channels-count">正在检查连接</p></div>
+              <button id="refresh-channels" class="icon-button" type="button" title="刷新连接" aria-label="刷新连接"><span aria-hidden="true">↻</span></button>
             </div>
-            <div id="channels" class="channels" aria-live="polite">
-              <div class="channel-skeleton"></div>
-              <div class="channel-skeleton"></div>
+            <div id="channels" class="channels" aria-live="polite"><div class="channel-skeleton"></div></div>
+
+            <section class="popover-section" aria-labelledby="models-title">
+              <div class="popover-section-head"><div><h3 id="models-title">模型</h3><p id="models-summary">正在读取可用模型</p></div><span id="active-model" class="quiet-value">加载中</span></div>
+              <div id="models" class="model-options" aria-live="polite"><div class="model-skeleton"></div></div>
+              <p id="models-feedback" class="model-feedback hidden" role="status"></p>
+            </section>
+
+            <div class="popover-commands">
+              <button id="open-memory" type="button"><span aria-hidden="true">◎</span><span>记忆与通知</span></button>
+              <button id="logout" type="button"><span aria-hidden="true">↗</span><span>退出此设备</span></button>
             </div>
-            <div class="popover-foot">
-              <span class="footer-dot" aria-hidden="true"></span>
-              <span>安全地运行在你的设备上</span>
-            </div>
+            <div class="popover-foot"><span class="footer-dot" aria-hidden="true"></span><span>安全地运行在你的设备上</span></div>
           </section>
         </div>
       </div>
@@ -76,73 +51,84 @@
 
     <main class="workspace">
       <section id="messages" class="messages" aria-live="polite" aria-label="和 Aniya 的对话">
+        <button id="load-older" class="load-older hidden" type="button">更早的记录</button>
         <div id="empty-state" class="empty-state">
           <div class="presence-stage" aria-hidden="true">
             <div class="signal-track signal-track-left"><i></i><i></i><i></i></div>
             <div class="presence">
-              <div class="presence-mark">
-                <img src="/assets/aniya-logo.jpg" alt="" />
-              </div>
-              <div class="presence-wave">
-                <i></i><i></i><i></i><i></i><i></i>
-              </div>
+              <div class="presence-mark"><img src="/assets/aniya-logo.jpg" alt="" /></div>
+              <div class="presence-wave"><i></i><i></i><i></i><i></i><i></i></div>
             </div>
             <div class="signal-track signal-track-right"><i></i><i></i><i></i></div>
           </div>
-
-          <div class="companion-meta">
-            <span id="current-time">--:--</span>
-            <span class="meta-separator" aria-hidden="true"></span>
-            <span id="presence-status">正在同步状态</span>
-          </div>
+          <div class="companion-meta"><span id="current-time">--:--</span><span class="meta-separator" aria-hidden="true"></span><span id="presence-status">正在同步状态</span></div>
           <p id="current-date" class="welcome-context">我在这里</p>
           <h1 id="greeting">晚上好。</h1>
-          <p class="welcome-copy">想聊聊，还是有什么事情想让我替你处理？</p>
-
+          <p id="welcome-copy" class="welcome-copy">想聊聊，还是有什么事情想让我替你处理？</p>
+          <p id="track-unavailable" class="track-unavailable hidden"></p>
         </div>
       </section>
 
       <div class="conversation-dock">
-        <div id="activity" class="activity hidden" aria-live="polite">
-          <span class="activity-wave" aria-hidden="true"><i></i><i></i><i></i></span>
-          <span id="activity-text">正在思考</span>
+        <div id="activity" class="activity hidden" aria-live="polite"><span class="activity-wave" aria-hidden="true"><i></i><i></i><i></i></span><span id="activity-text">正在思考</span></div>
+        <div class="dock-controls">
+          <div class="mode-control">
+            <button id="mode-toggle" class="mode-toggle" type="button" aria-label="切换对话模式" aria-expanded="false" aria-controls="mode-menu">
+              <span id="mode-mark" class="mode-mark assistant" aria-hidden="true"></span>
+              <span id="track-label">陪伴</span>
+              <span class="mode-chevron" aria-hidden="true">⌄</span>
+            </button>
+            <button id="new-track" class="track-action hidden" type="button" title="开始新主题" aria-label="开始新主题"><span aria-hidden="true">＋</span></button>
+            <section id="mode-menu" class="mode-menu hidden" aria-label="对话模式">
+              <button type="button" data-mode="assistant" aria-pressed="true"><span class="mode-option-mark assistant" aria-hidden="true"></span><strong>陪伴</strong><span>当前</span></button>
+              <button type="button" data-mode="coding" aria-pressed="false"><span class="mode-option-mark coding" aria-hidden="true"></span><strong>项目</strong><span></span></button>
+              <button type="button" data-mode="qa" aria-pressed="false"><span class="mode-option-mark qa" aria-hidden="true"></span><strong>问答</strong><span></span></button>
+            </section>
+          </div>
+          <button id="conversation-open" class="conversation-open" type="button" title="和 Aniya 说话" aria-label="和 Aniya 说话"><span class="call-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span></button>
         </div>
-
-        <button id="conversation-open" class="conversation-open" type="button" title="和 Aniya 说话" aria-label="和 Aniya 说话">
-          <span class="call-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
-        </button>
-
         <form id="composer" class="composer hidden">
           <div class="composer-box">
-            <div class="composer-avatar" aria-hidden="true">
-              <img src="/assets/aniya-chat-avatar.jpg" alt="" />
-            </div>
+            <div class="composer-avatar" aria-hidden="true"><img src="/assets/aniya-chat-avatar.jpg" alt="" /></div>
             <label class="sr-only" for="input">和 Aniya 说点什么</label>
             <textarea id="input" rows="1" placeholder="和 Aniya 说点什么…" autocomplete="off"></textarea>
-            <button id="send" class="send-button" type="submit" title="发送消息" aria-label="发送消息">
-              <span aria-hidden="true">↑</span>
-            </button>
+            <button id="send" class="send-button" type="submit" title="发送消息" aria-label="发送消息"><span aria-hidden="true">↑</span></button>
           </div>
         </form>
       </div>
     </main>
   </div>
 
+  <div id="drawer-scrim" class="drawer-scrim hidden"></div>
+  <aside id="memory-drawer" class="memory-drawer hidden" aria-labelledby="drawer-title">
+    <header class="drawer-head">
+      <div><span class="drawer-kicker">PRIVATE ARCHIVE</span><h2 id="drawer-title">你的 Aniya</h2></div>
+      <button id="close-memory" class="icon-button" type="button" title="关闭" aria-label="关闭"><span aria-hidden="true">×</span></button>
+    </header>
+    <div class="drawer-tabs" role="tablist">
+      <button type="button" role="tab" data-view="plans" aria-selected="true">计划</button>
+      <button type="button" role="tab" data-view="notifications" aria-selected="false">通知</button>
+      <button type="button" role="tab" data-view="daily" aria-selected="false">每日</button>
+      <button type="button" role="tab" data-view="memory" aria-selected="false">记忆</button>
+      <button type="button" role="tab" data-view="binding" aria-selected="false">微信</button>
+    </div>
+    <div class="drawer-toolbar">
+      <p id="drawer-summary">你的任务、提醒与 Routine</p>
+      <div class="drawer-toolbar-actions">
+        <button id="new-plan" class="text-command" type="button">新增</button>
+        <button id="export-memory" class="text-command" type="button">导出</button>
+      </div>
+    </div>
+    <div id="drawer-content" class="drawer-content" aria-live="polite"></div>
+  </aside>
+
   <div id="permission" class="permission hidden" role="dialog" aria-modal="true" aria-labelledby="permission-title">
     <div class="permission-card">
-      <div class="permission-icon" aria-hidden="true">
-        <img src="/assets/aniya-logo.jpg" alt="" />
-      </div>
+      <div class="permission-icon" aria-hidden="true"><img src="/assets/aniya-logo.jpg" alt="" /></div>
       <h2 id="permission-title">这一步需要你的同意</h2>
       <p id="permission-reason" class="permission-reason"></p>
-      <div class="permission-input-wrap">
-        <span>将要执行的内容</span>
-        <pre id="permission-input"></pre>
-      </div>
-      <div class="permission-actions">
-        <button id="deny" type="button">先不要</button>
-        <button id="allow" type="button">可以</button>
-      </div>
+      <div class="permission-input-wrap"><span>将要执行的内容</span><pre id="permission-input"></pre></div>
+      <div class="permission-actions"><button id="deny" type="button">先不要</button><button id="allow" type="button">可以</button></div>
     </div>
   </div>
 

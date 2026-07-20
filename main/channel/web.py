@@ -418,6 +418,23 @@ class WebChannel:
                         return
                     self._send_json({"ok": True, "notifications": channel.memory_admin.notification_status()})
                     return
+                if parsed.path == "/plans":
+                    if not self._authorized() or channel.memory_admin is None:
+                        self._send_json({"ok": False, "error": "Plan API unavailable"}, status=503)
+                        return
+                    try:
+                        plans = channel.memory_admin.plans()
+                    except RuntimeError as exc:
+                        self._send_json({"ok": False, "error": str(exc)}, status=503)
+                        return
+                    self._send_json({"ok": True, **plans})
+                    return
+                if parsed.path == "/weixin/binding":
+                    if not self._authorized() or channel.memory_admin is None:
+                        self._send_json({"ok": False, "error": "Weixin binding API unavailable"}, status=503)
+                        return
+                    self._send_json({"ok": True, "binding": channel.memory_admin.weixin_binding()})
+                    return
                 if parsed.path == "/stream":
                     if not self._authorized():
                         self._send_json({"ok": False, "error": "Unauthorized"}, status=401)
@@ -504,6 +521,29 @@ class WebChannel:
                         self._send_json({"ok": False, "error": str(exc)}, status=400)
                         return
                     self._send_json({"ok": True, "memory": result.to_dict()})
+                    return
+                if parsed.path == "/plans/action":
+                    if not self._authorized() or channel.memory_admin is None:
+                        self._send_json({"ok": False, "error": "Plan API unavailable"}, status=503)
+                        return
+                    try:
+                        result = channel.memory_admin.plan_action(self._read_json())
+                    except (ValueError, FileNotFoundError, RuntimeError) as exc:
+                        self._send_json({"ok": False, "error": str(exc)}, status=400)
+                        return
+                    self._send_json({"ok": True, **result})
+                    return
+                if parsed.path == "/weixin/binding/code":
+                    if not self._authorized() or channel.memory_admin is None:
+                        self._send_json({"ok": False, "error": "Weixin binding API unavailable"}, status=503)
+                        return
+                    self._send_json({"ok": True, "code": channel.memory_admin.issue_weixin_binding_code(), "expires_in": 600})
+                    return
+                if parsed.path == "/weixin/binding/invalidate":
+                    if not self._authorized() or channel.memory_admin is None:
+                        self._send_json({"ok": False, "error": "Weixin binding API unavailable"}, status=503)
+                        return
+                    self._send_json({"ok": True, "invalidated": channel.memory_admin.invalidate_weixin_binding()})
                     return
                 self._send_json({"ok": False, "error": "Not found"}, status=404)
 

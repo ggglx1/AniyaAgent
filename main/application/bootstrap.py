@@ -27,7 +27,13 @@ class AniyaApplication:
     def start_scheduler(self): return self.lifecycle.start_once(self.scheduler.start)
     def stop(self): self.lifecycle.stop(self.scheduler.stop)
     @property
-    def memory_admin_dependencies(self): return self._runtime.conversation_memory, self._runtime.personal_memory_manager
+    def memory_admin_dependencies(self):
+        return (
+            self._runtime.conversation_memory,
+            self._runtime.personal_memory_manager,
+            self._runtime.personal_state,
+            self._runtime.routine_manager,
+        )
 
 
 def create_application() -> AniyaApplication:

@@ -78,6 +78,13 @@ class NotificationOutbox:
             row = connection.execute("SELECT * FROM owner_channel_bindings WHERE owner_id=? AND channel_id='weixin' AND status='verified'", (owner_id,)).fetchone()
         return dict(row) if row else None
 
+    def invalidate_binding(self, owner_id: str) -> bool:
+        with self.lock, self.connect() as connection:
+            return bool(connection.execute(
+                "UPDATE owner_channel_bindings SET status='invalid' WHERE owner_id=? AND channel_id='weixin' AND status='verified'",
+                (owner_id,),
+            ).rowcount)
+
     def enqueue(self, reminder_id: str, channel_id: str, recipient_id: str, payload: dict, occurrence: str) -> str:
         key = f"{reminder_id}:{channel_id}:{occurrence}"
         now = self.now()
