@@ -98,7 +98,8 @@ class NotificationOutbox:
         claimed = []
         with self.lock, self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute("UPDATE notification_outbox SET state='retry_scheduled', worker_id='', claim_token='', lease_expires_at='', error='lease expired before delivery' WHERE state IN ('claimed','sending') AND lease_expires_at<>'' AND lease_expires_at<?", (now,))
+            connection.execute("UPDATE notification_outbox SET state='retry_scheduled', worker_id='', claim_token='', lease_expires_at='', error='claim lease expired before send' WHERE state='claimed' AND lease_expires_at<>'' AND lease_expires_at<?", (now,))
+            connection.execute("UPDATE notification_outbox SET state='delivery_unknown', lease_expires_at='', error='sending lease expired; provider outcome is unknown' WHERE state='sending' AND lease_expires_at<>'' AND lease_expires_at<?", (now,))
             rows = connection.execute("SELECT * FROM notification_outbox WHERE state IN ('pending','retry_scheduled') AND available_at<=? ORDER BY created_at LIMIT ?", (now, limit)).fetchall()
             for row in rows:
                 token = uuid.uuid4().hex
@@ -138,6 +139,16 @@ class NotificationOutbox:
         with self.connect() as connection:
             rows=connection.execute("SELECT * FROM notification_outbox WHERE state='delivered' AND business_reconciled_at='' ORDER BY delivered_at").fetchall()
         return [{**dict(row), 'payload': json.loads(row['payload_json'])} for row in rows]
+
+    def unknown_deliveries(self) -> list[dict]:
+        with self.connect() as connection:
+            rows = connection.execute("SELECT * FROM notification_outbox WHERE state='delivery_unknown' ORDER BY sending_at").fetchall()
+        return [{**dict(row), 'payload': json.loads(row['payload_json'])} for row in rows]
+
+    def reconcile_unknown(self, outbox_id: str, delivered: bool, note: str = "") -> bool:
+        state = 'delivered' if delivered else 'retry_scheduled'; now = self.now()
+        with self.lock, self.connect() as connection:
+            return bool(connection.execute("UPDATE notification_outbox SET state=?, delivered_at=CASE WHEN ?='delivered' THEN ? ELSE delivered_at END, available_at=CASE WHEN ?='retry_scheduled' THEN ? ELSE available_at END, error=? WHERE id=? AND state='delivery_unknown'", (state,state,now,state,now,note[:1000],outbox_id)).rowcount)
 
     def list(self, limit: int = 100) -> list[dict]:
         with self.connect() as connection:

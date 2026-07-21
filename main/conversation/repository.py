@@ -4,7 +4,6 @@ import json
 import sqlite3
 import threading
 import uuid
-import shutil
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -115,9 +114,10 @@ class ConversationMemoryRepository:
             return
         backup = self.db_path.with_suffix(".pre_track_v2.db")
         if not backup.exists() and self.db_path.exists():
-            # WAL is committed by this point; the backup is an operator rollback point.
-            connection.commit()
-            shutil.copy2(self.db_path, backup)
+            # SQLite backup API includes WAL pages; copying only the .db file does not.
+            target = sqlite3.connect(backup)
+            try: connection.backup(target)
+            finally: target.close()
         connection.executescript("""
             CREATE TABLE IF NOT EXISTS conversation_tracks (
                 owner_id TEXT NOT NULL, mode TEXT NOT NULL, scope_id TEXT NOT NULL, track_id TEXT NOT NULL,
@@ -148,6 +148,9 @@ class ConversationMemoryRepository:
                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_maintenance_claim ON maintenance_requests(state, lease_expires_at, created_at);
+            CREATE TABLE IF NOT EXISTS scheduler_lease (
+                lease_name TEXT PRIMARY KEY, worker_id TEXT NOT NULL, expires_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
         """)
         now = datetime.now().astimezone().isoformat()
         rows = connection.execute("SELECT * FROM conversation_messages ORDER BY seq").fetchall()
@@ -164,6 +167,7 @@ class ConversationMemoryRepository:
         now = datetime.now(ZoneInfo(timezone_name)); date = now.date().isoformat(); created_at = now.isoformat()
         with self.lock, self.connect() as connection:
             connection.execute("INSERT OR IGNORE INTO conversation_tracks(owner_id,mode,scope_id,track_id,repository_id,work_session_id,topic_id,retention_class,expires_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)", (owner_id,mode,scope_id,track_id,repository_id,work_session_id,topic_id,retention_class,expires_at,created_at,created_at))
+            connection.execute("UPDATE conversation_tracks SET updated_at=?, expires_at=CASE WHEN ?<>'' THEN ? ELSE expires_at END WHERE owner_id=? AND mode=? AND scope_id=? AND track_id=?", (created_at, expires_at, expires_at, owner_id,mode,scope_id,track_id))
             connection.execute("INSERT OR IGNORE INTO conversation_track_days(owner_id,mode,scope_id,track_id,local_date,timezone_at_creation,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)", (owner_id,mode,scope_id,track_id,date,timezone_name,created_at,created_at))
             sequence = int(connection.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM conversation_track_messages").fetchone()[0])
             track_sequence = int(connection.execute("SELECT COALESCE(MAX(track_sequence),0)+1 FROM conversation_track_messages WHERE owner_id=? AND mode=? AND scope_id=? AND track_id=?", (owner_id,mode,scope_id,track_id)).fetchone()[0])
@@ -188,13 +192,31 @@ class ConversationMemoryRepository:
 
     def expire_track_messages(self, now: str) -> int:
         with self.lock, self.connect() as connection:
-            return connection.execute("UPDATE conversation_track_messages SET content_json='{\"redacted\":true,\"reason\":\"retention_expired\"}', redacted_at=? WHERE expires_at<>'' AND expires_at<=? AND redacted_at=''", (now, now)).rowcount
+            count = connection.execute("UPDATE conversation_track_messages SET content_json='{\"redacted\":true,\"reason\":\"retention_expired\"}', redacted_at=? WHERE expires_at<>'' AND expires_at<=? AND redacted_at=''", (now, now)).rowcount
+            connection.execute("UPDATE conversation_tracks SET status='closed', updated_at=? WHERE mode='qa' AND NOT EXISTS (SELECT 1 FROM conversation_track_messages message WHERE message.track_id=conversation_tracks.track_id AND message.redacted_at='')", (now,))
+            return count
 
     def request_maintenance(self, kind: str, payload: dict | None = None) -> str:
-        now = datetime.now(timezone.utc).isoformat().replace('+00:00','Z'); request_id = f'maint_{uuid.uuid4().hex[:16]}'
+        now = datetime.now(timezone.utc).isoformat().replace('+00:00','Z'); request_id = f'maint_{uuid.uuid4().hex[:16]}'; normalized=json.dumps(payload or {},ensure_ascii=False,sort_keys=True)
         with self.lock, self.connect() as connection:
-            connection.execute("INSERT INTO maintenance_requests(id,kind,payload_json,created_at,updated_at) VALUES (?,?,?,?,?)", (request_id,kind,json.dumps(payload or {},ensure_ascii=False),now,now))
+            existing=connection.execute("SELECT id FROM maintenance_requests WHERE kind=? AND payload_json=? AND state IN ('pending','claimed') ORDER BY created_at DESC LIMIT 1", (kind,normalized)).fetchone()
+            if existing: return str(existing['id'])
+            connection.execute("INSERT INTO maintenance_requests(id,kind,payload_json,created_at,updated_at) VALUES (?,?,?,?,?)", (request_id,kind,normalized,now,now))
         return request_id
+
+    def acquire_scheduler_lease(self, worker_id: str, lease_seconds: int = 90) -> bool:
+        now=datetime.now(timezone.utc); now_s=now.isoformat().replace('+00:00','Z'); expires=(now+__import__('datetime').timedelta(seconds=lease_seconds)).isoformat().replace('+00:00','Z')
+        with self.lock, self.connect() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            row=connection.execute("SELECT * FROM scheduler_lease WHERE lease_name='primary'").fetchone()
+            allowed=row is None or row['worker_id']==worker_id or row['expires_at']<now_s
+            if allowed: connection.execute("INSERT OR REPLACE INTO scheduler_lease(lease_name,worker_id,expires_at,updated_at) VALUES ('primary',?,?,?)", (worker_id,expires,now_s))
+            connection.execute('COMMIT')
+        return allowed
+
+    def release_scheduler_lease(self, worker_id: str) -> None:
+        with self.lock, self.connect() as connection:
+            connection.execute("DELETE FROM scheduler_lease WHERE lease_name='primary' AND worker_id=?", (worker_id,))
 
     def claim_maintenance(self, worker_id: str, limit: int = 10, lease_seconds: int = 120) -> list[dict]:
         now = datetime.now(timezone.utc); now_s=now.isoformat().replace('+00:00','Z'); until=(now+__import__('datetime').timedelta(seconds=lease_seconds)).isoformat().replace('+00:00','Z'); claimed=[]
@@ -221,6 +243,9 @@ class ConversationMemoryRepository:
         self, role: str, content: object, *, channel: str = "web", timezone_name: str = "Asia/Shanghai",
         reply_to_message_id: str = "", metadata: dict | None = None,
     ) -> ConversationMessage:
+        # v2 track facts are canonical. Legacy tables are retained only for migration reads.
+        return self.append_track_message(role, content, channel=channel, timezone_name=timezone_name,
+                                         reply_to_message_id=reply_to_message_id, metadata=metadata)
         if role not in {"user", "assistant", "tool", "system"}:
             raise ValueError(f"Unsupported factual message role: {role}")
         now = datetime.now(ZoneInfo(timezone_name))
@@ -253,17 +278,17 @@ class ConversationMemoryRepository:
     def recent_messages(self, limit: int = 12) -> list[ConversationMessage]:
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM conversation_messages WHERE redacted_at='' ORDER BY seq DESC LIMIT ?", (max(1, limit),)
+                "SELECT * FROM conversation_track_messages WHERE mode='assistant' AND track_id='assistant:personal' AND redacted_at='' ORDER BY track_sequence DESC LIMIT ?", (max(1, limit),)
             ).fetchall()
-        return [self.to_message(row) for row in reversed(rows)]
+        return [self.to_track_message(row) for row in reversed(rows)]
 
     def messages_for_day(self, local_date: str, include_redacted: bool = False) -> list[ConversationMessage]:
         with self.connect() as connection:
-            sql = "SELECT * FROM conversation_messages WHERE day_date=?"
+            sql = "SELECT * FROM conversation_track_messages WHERE mode='assistant' AND track_id='assistant:personal' AND day_date=?"
             if not include_redacted:
                 sql += " AND redacted_at=''"
             rows = connection.execute(sql + " ORDER BY seq", (local_date,)).fetchall()
-        return [self.to_message(row) for row in rows]
+        return [self.to_track_message(row) for row in rows]
 
     def day(self, local_date: str) -> dict | None:
         with self.connect() as connection:
@@ -326,6 +351,7 @@ class ConversationMemoryRepository:
     def replace_message_content(self, message_id: str, content: object) -> None:
         with self.lock, self.connect() as connection:
             connection.execute("UPDATE conversation_messages SET content_json=? WHERE message_id=?", (json.dumps(self.normalize(content), ensure_ascii=False), message_id))
+            connection.execute("UPDATE conversation_track_messages SET content_json=? WHERE message_id=?", (json.dumps(self.normalize(content), ensure_ascii=False), message_id))
 
     def attachments(self, message_id: str) -> list[dict]:
         with self.connect() as connection:
@@ -373,6 +399,7 @@ class ConversationMemoryRepository:
                             now,
                         ),
                     )
+            connection.execute("DELETE FROM conversation_attachments WHERE message_id=?", (message_id,))
 
     def linked_long_term_memory_ids(self, message_id: str) -> list[str]:
         with self.connect() as connection:
@@ -390,14 +417,14 @@ class ConversationMemoryRepository:
         with self.connect() as connection:
             row = connection.execute(
                 """SELECT COUNT(*) AS count FROM long_term_memory_sources source
-                   JOIN conversation_messages message ON message.message_id=source.message_id
+                   JOIN conversation_track_messages message ON message.message_id=source.message_id
                    WHERE source.memory_id=? AND message.redacted_at=''""", (memory_id,)
             ).fetchone()
         return int(row["count"])
 
     def message_is_active(self, message_id: str) -> bool:
         with self.connect() as connection:
-            row = connection.execute("SELECT 1 FROM conversation_messages WHERE message_id=? AND redacted_at=''", (message_id,)).fetchone()
+            row = connection.execute("SELECT 1 FROM conversation_track_messages WHERE message_id=? AND redacted_at=''", (message_id,)).fetchone()
         return row is not None
 
     def message(self, message_id: str):
@@ -410,8 +437,8 @@ class ConversationMemoryRepository:
 
     def export(self) -> list[dict]:
         with self.connect() as connection:
-            rows = connection.execute("SELECT * FROM conversation_messages ORDER BY seq").fetchall()
-        return [self.to_message(row).to_dict() for row in rows]
+            rows = connection.execute("SELECT * FROM conversation_track_messages ORDER BY sequence").fetchall()
+        return [self.to_track_message(row).to_dict() for row in rows]
 
     def to_message(self, row) -> ConversationMessage:
         return ConversationMessage(

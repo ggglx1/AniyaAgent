@@ -9,6 +9,7 @@ from .pipeline import StructuredMemoryPipeline
 from .consolidator import MemoryConsolidator
 from .maintenance import MemoryMaintenanceService
 from .scopes import MemoryScopePolicy
+from .intent_guard import IntentGuard
 from .migration import LegacyMemoryMigration
 from .legacy_audit import LegacyMemoryAudit
 from .llm_extractor import ControlledLlmMemoryExtractor

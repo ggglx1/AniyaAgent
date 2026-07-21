@@ -2,6 +2,7 @@ import os
 import random
 import time
 from dataclasses import dataclass
+from main.agent import runtime_context as RuntimeContext
 
 
 DEFAULT_MAX_TOKENS = 8000
@@ -69,6 +70,7 @@ class ErrorRecovery:
     def with_retry(self, fn, state: RecoveryState):
         last_error = None
         for attempt in range(self.max_retries):
+            RuntimeContext.ensure_deadline()
             try:
                 response = fn()
                 state.consecutive_529 = 0
@@ -82,7 +84,7 @@ class ErrorRecovery:
                         f"[429 rate limit] retry {attempt + 1}/{self.max_retries}, "
                         f"wait {delay:.1f}s"
                     )
-                    self.sleep_fn(delay)
+                    self.sleep_fn(self.bounded_delay(delay))
                     continue
 
                 if self.is_overloaded(exc):
@@ -95,12 +97,18 @@ class ErrorRecovery:
                         f"[529 overloaded] retry {attempt + 1}/{self.max_retries}, "
                         f"wait {delay:.1f}s"
                     )
-                    self.sleep_fn(delay)
+                    self.sleep_fn(self.bounded_delay(delay))
                     continue
 
                 raise
 
         raise RuntimeError(f"Max retries ({self.max_retries}) exceeded") from last_error
+
+    def bounded_delay(self, delay: float) -> float:
+        remaining = RuntimeContext.remaining_seconds()
+        if remaining is None: return delay
+        if remaining <= 0: RuntimeContext.ensure_deadline()
+        return min(delay, remaining)
 
     def retry_delay(self, attempt: int, retry_after: float | None = None) -> float:
         if retry_after is not None:

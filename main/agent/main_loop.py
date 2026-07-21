@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import copy
+import os
 import threading
 import time
 from pathlib import Path
@@ -63,7 +64,7 @@ from main.channel.types import ChannelKind  # noqa: E402
 SETTINGS = ensure_configured()
 MODEL = SETTINGS.model
 llm_gateway = LlmGateway(client, MODEL, logger=print)
-WORKDIR = ROOT_DIR
+WORKDIR = Path(os.environ.get("ANIYA_AGENT_WORKDIR", ROOT_DIR)).resolve()
 permissions = Permissions(WORKDIR)
 hooks = Hooks()
 hooks.register("PreToolUse", permissions.check)
@@ -292,10 +293,12 @@ def run_tool_turn(
     active_compactor: ContextCompactor | None = None,
     recovery_state: RecoveryState | None = None,
 ) -> tuple[bool, set[str]]:
+    RuntimeContext.ensure_deadline()
     recovery_state = recovery_state or error_recovery.new_state()
     current_request_messages = request_messages or messages
 
     while True:
+        RuntimeContext.ensure_deadline()
         RuntimeContext.event(
             "llm.request.started",
             {
@@ -364,6 +367,7 @@ def run_tool_turn(
     results = []
     for block in response.content:
         if block.type == "tool_use":
+            RuntimeContext.ensure_deadline()
             used_tools.add(block.name)
             print(f"\n{label}> {block.name}")
             RuntimeContext.event(
@@ -413,6 +417,7 @@ def run_tool_turn(
                 )
             else:
                 output = toolset.execute(block)
+            RuntimeContext.ensure_deadline()
             hooks.trigger("PostToolUse", block, output)
             print(str(output)[:200])
             RuntimeContext.event(
@@ -438,6 +443,7 @@ def run_tool_turn(
 def run_tool_loop(messages: list, toolset: Tools, system: str, label: str, max_turns: int = 30) -> None:
     recovery_state = error_recovery.new_state()
     for _ in range(max_turns):
+        RuntimeContext.ensure_deadline()
         try:
             needs_more_tools, _ = run_tool_turn(
                 messages,
@@ -507,6 +513,7 @@ def agent_loop(messages: list) -> None:
     memory_turn = len(messages) - 1 if messages and isinstance(messages[-1].get("content"), str) else None
 
     while True:
+        RuntimeContext.ensure_deadline()
         if loop_guard.begin_turn(loop_state) == "stop":
             RuntimeContext.event("loop.guard.stopped", {"reason": "max_turns"})
             messages.append(

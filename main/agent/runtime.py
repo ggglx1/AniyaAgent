@@ -9,6 +9,8 @@ from typing import Callable
 from main.storage.audit_log import AuditLog
 from main.storage.conversation_store import ConversationStore
 from main.agent.runtime_context import bind_runtime, clear_runtime
+from main.agent.conversation_integrity import ConversationIntegrityValidator
+from main.agent.deadline import RunDeadline
 from main.conversation import ConversationMemoryRepository, ConversationMemoryService
 
 
@@ -48,6 +50,7 @@ class AgentRuntime:
         self.memory_maintenance = memory_maintenance
         self.memory_source_provider = memory_source_provider
         self.audit = AuditLog(self.workdir)
+        self.integrity = ConversationIntegrityValidator()
         self.session_locks: dict[str, threading.Lock] = {}
         self.session_locks_guard = threading.Lock()
 
@@ -110,7 +113,7 @@ class AgentRuntime:
                     "channel": channel_context,
                 },
             )
-            messages = self.conversations.load(session_id)
+            messages = self.load_clean_context(session_id, run_id)
             initial_message_count = len(messages)
             messages.append({"role": "user", "content": user_text})
             factual_ids: list[str] = []
@@ -123,16 +126,16 @@ class AgentRuntime:
                         "user", user_text, timezone_name=timezone_name, metadata={"channel": "web"}
                     ).message_id
                 )
-            self.conversations.save(session_id, messages)
+            self.conversations.save_working(session_id, messages)
             checkpoint_path = self.conversations.checkpoint(session_id, run_id, messages)
             self.audit.write(run_id, "checkpoint.before", {"path": str(checkpoint_path)})
 
-            deadline = started_at + self.max_run_seconds
-            bind_runtime(run_id, session_id, self.audit, self.conversations, event_callback)
+            deadline = RunDeadline.after(self.max_run_seconds)
+            bind_runtime(run_id, session_id, self.audit, self.conversations, event_callback, deadline)
             self.agent_loop(messages)
-            if time.time() > deadline:
-                raise TimeoutError(f"Run exceeded {self.max_run_seconds} seconds.")
+            deadline.require_remaining()
 
+            self.ensure_clean_or_recover(session_id, run_id, messages)
             self.conversations.save(session_id, messages)
             if self.is_web_context(channel_context):
                 factual_ids.extend(
@@ -187,6 +190,32 @@ class AgentRuntime:
         finally:
             clear_runtime()
             lock.release()
+
+    def load_clean_context(self, session_id: str, run_id: str) -> list:
+        messages = self.conversations.load(session_id)
+        report = self.integrity.validate(messages)
+        if report.valid: return messages
+        self.conversations.quarantine(session_id, run_id, messages, "loaded context integrity failure", report.errors)
+        repaired, repaired_report = self.integrity.repair(messages)
+        if repaired_report.valid:
+            self.conversations.save(session_id, repaired)
+            self.audit.write(run_id, "context.recovered", {"errors": report.errors, "quarantined": len(repaired_report.quarantined)})
+            return repaired
+        fallback = self.conversations.load_last_known_good(session_id)
+        if fallback and self.integrity.validate(fallback).valid:
+            self.audit.write(run_id, "context.rolled_back", {"errors": report.errors})
+            return fallback
+        return []
+
+    def ensure_clean_or_recover(self, session_id: str, run_id: str, messages: list) -> None:
+        report = self.integrity.validate(messages)
+        if report.valid: return
+        self.conversations.quarantine(session_id, run_id, messages, "working context integrity failure", report.errors)
+        repaired, repaired_report = self.integrity.repair(messages)
+        if not repaired_report.valid:
+            raise RuntimeError("Conversation recovery could not produce a valid context")
+        messages[:] = repaired
+        self.audit.write(run_id, "context.recovered", {"errors": report.errors, "quarantined": len(repaired_report.quarantined)})
 
     def latest_assistant_text(self, messages: list) -> str:
         for message in reversed(messages):

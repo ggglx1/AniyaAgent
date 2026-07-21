@@ -47,7 +47,11 @@ class ConversationRetentionService:
         }
 
     def export(self) -> list[dict]:
-        return self.repository.export()
+        return {
+            "tracks": self.repository.list_tracks(),
+            "messages": self.repository.export(),
+            "daily_memories": self.repository.list_days(),
+        }
 
     def text(self, content) -> str:
         return content if isinstance(content, str) else str(content)

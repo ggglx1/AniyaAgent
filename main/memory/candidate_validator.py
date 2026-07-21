@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from .intent_guard import IntentGuard
 
 
 class CandidateValidator:
@@ -9,6 +10,7 @@ class CandidateValidator:
 
     def __init__(self, conversation_repository):
         self.repository = conversation_repository
+        self.intent_guard = IntentGuard()
 
     def validate(self, candidate: dict, allowed_source_ids: set[str]) -> dict | None:
         if candidate.get("memory_type") not in self.allowed_types:
@@ -16,6 +18,10 @@ class CandidateValidator:
         if candidate.get("privacy_level", "normal") not in self.allowed_privacy:
             return None
         if not isinstance(candidate.get("content"), str) or not candidate["content"].strip():
+            return None
+        # Model and deterministic extractors may only propose candidates. Reject common
+        # non-factual language before it reaches profile or long-term memory writes.
+        if self.intent_guard.decision(candidate["content"], source_role="user") == "rejected":
             return None
         try:
             candidate["importance"] = max(0.0, min(float(candidate.get("importance", 0.5)), 1.0))

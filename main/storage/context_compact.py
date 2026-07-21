@@ -2,6 +2,8 @@ import json
 import copy
 import time
 from pathlib import Path
+from main.agent.conversation_integrity import ConversationIntegrityValidator
+from main.agent import runtime_context as RuntimeContext
 
 
 class ContextCompactor:
@@ -23,12 +25,14 @@ class ContextCompactor:
         self.transcript_dir = self.workdir / ".transcripts"
         self.tool_results_dir = self.workdir / ".task_outputs" / "tool-results"
         self.compacted_results_dir = self.workdir / ".task_outputs" / "compacted-tool-results"
+        self.integrity = ConversationIntegrityValidator()
 
     def preprocess(self, messages: list) -> list:
+        messages = self.validated(messages)
         messages = self.tool_result_budget(messages)
         messages = self.snip_compact(messages)
         messages = self.micro_compact(messages)
-        return messages
+        return self.validated(messages)
 
     def should_auto_compact(self, messages: list) -> bool:
         return self.estimate_size(messages) > self.context_limit
@@ -37,17 +41,21 @@ class ContextCompactor:
         return len(str(messages))
 
     def snip_compact(self, messages: list, max_messages: int = 50) -> list:
+        units = self.integrity.units(messages)
         if len(messages) <= max_messages:
             return messages
-
-        keep_head = 3
-        keep_tail = max_messages - keep_head
-        snipped = len(messages) - keep_head - keep_tail
-        return (
-            messages[:keep_head]
-            + [{"role": "user", "content": f"[snipped {snipped} messages]"}]
-            + messages[-keep_tail:]
-        )
+        head, tail = [], []
+        head_size = 0
+        for unit in units:
+            if head_size + len(unit) > 3: break
+            head.append(unit); head_size += len(unit)
+        tail_size = 0
+        for unit in reversed(units[len(head):]):
+            if head_size + tail_size + len(unit) > max_messages - 1: break
+            tail.append(unit); tail_size += len(unit)
+        kept = len(head) + len(tail)
+        omitted = max(0, len(units) - kept)
+        return self.integrity.flatten(head) + [{"role": "user", "content": f"[snipped {omitted} complete conversation units]"}] + self.integrity.flatten(list(reversed(tail)))
 
     def collect_tool_results(self, messages: list) -> list:
         blocks = []
@@ -243,6 +251,7 @@ class ContextCompactor:
         return path
 
     def summarize_history(self, messages: list) -> str:
+        RuntimeContext.ensure_deadline(30)
         conversation = json.dumps(messages, ensure_ascii=False, default=str)[:80_000]
         prompt = (
             "Summarize this personal-assistant conversation so work can continue.\n"
@@ -265,14 +274,15 @@ class ContextCompactor:
         transcript_path = self.write_transcript(messages)
         print(f"[transcript saved: {transcript_path}]")
         summary = self.summarize_history(messages)
-        return self.build_compacted_messages(
+        return self.validated(self.build_compacted_messages(
             label="Compacted",
             summary=summary,
             messages=messages,
             keep_recent=6,
-        )
+        ))
 
     def reactive_compact(self, messages: list, level: int = 1) -> list:
+        RuntimeContext.ensure_deadline(30)
         transcript_path = self.write_transcript(messages)
         print(f"[reactive transcript saved: {transcript_path}]")
         if level <= 1:
@@ -424,7 +434,7 @@ class ContextCompactor:
             compacted.append(first_message)
 
         compacted.extend(self.recent_messages(messages, keep_recent, skip_first=True))
-        return compacted
+        return self.validated(compacted)
 
     def first_preserved_message(self, messages: list) -> dict | None:
         if not messages:
@@ -439,26 +449,20 @@ class ContextCompactor:
         if count <= 0:
             return []
 
-        indexed_messages = [
-            (index, message)
-            for index, message in enumerate(messages)
-            if not (skip_first and index == 0)
-        ]
-        selected = indexed_messages[-count:]
-        if not selected:
-            return []
+        units = self.integrity.units(messages)
+        if skip_first and units: units = units[1:]
+        selected, used = [], 0
+        for unit in reversed(units):
+            if selected and used + len(unit) > count: break
+            selected.append(unit); used += len(unit)
+        return [self.safe_message_copy(message, max_chars=8000) for unit in reversed(selected) for message in unit]
 
-        start = selected[0][0]
-        recent = [self.safe_message_copy(message, max_chars=8000) for _, message in selected]
-
-        # If the preserved tail starts with tool_result, include the matching
-        # assistant tool_use before it so the message sequence remains valid.
-        if start > 1 and recent and self.message_has_tool_result(recent[0]):
-            previous = self.safe_message_copy(messages[start - 1], max_chars=8000)
-            if previous.get("role") == "assistant":
-                recent.insert(0, previous)
-
-        return recent
+    def validated(self, messages: list) -> list:
+        report = self.integrity.validate(messages)
+        if report.valid: return messages
+        repaired, repaired_report = self.integrity.repair(messages)
+        if not repaired_report.valid: raise RuntimeError(f"Context integrity failure: {report.errors}")
+        return repaired
 
     def safe_summary_input(self, messages: list) -> list:
         safe_messages = []

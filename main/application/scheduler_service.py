@@ -16,17 +16,19 @@ class SchedulerService:
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive(): return
+        if not self.repository.acquire_scheduler_lease(self.worker_id):
+            raise RuntimeError("Another Scheduler instance owns the active lease.")
         self._stop.clear(); self._thread = threading.Thread(target=self.run, daemon=True, name="aniyaagent-scheduler"); self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
-        for item in (self.runtime.reminder_dispatcher, self.runtime.routine_dispatcher, self.runtime.memory_maintenance): item.stop()
+        self.repository.release_scheduler_lease(self.worker_id)
 
     def run(self) -> None:
-        self.runtime.start_background_services()
         while not self._stop.wait(30): self.tick()
 
     def tick(self) -> dict:
+        if not self.repository.acquire_scheduler_lease(self.worker_id): return {'handled': 0, 'standby': True}
         handled = 0
         for item in self.repository.claim_maintenance(self.worker_id):
             try:
@@ -37,4 +39,19 @@ class SchedulerService:
             except Exception as exc:
                 self.repository.complete_maintenance(item['id'], item['claim_token'], f'{type(exc).__name__}: {exc}')
         self.repository.expire_track_messages(datetime.now(timezone.utc).isoformat().replace('+00:00','Z'))
+        self.runtime.reminder_dispatcher.tick()
+        self.runtime.routine_dispatcher.tick()
+        self.reconcile_outbox()
         return {'handled': handled}
+
+    def reconcile_outbox(self) -> None:
+        dispatcher = self.runtime.reminder_dispatcher
+        for item in dispatcher.delivery_outbox.unreconciled_deliveries():
+            try:
+                reminder = dispatcher.state.require_reminder(item['reminder_id'])
+                if reminder.status not in {'delivered', 'completed'}:
+                    dispatcher.state.update_reminder(reminder.id, {'status': 'delivered', 'last_delivered_at': item['delivered_at'], 'delivery_result': 'reconciled from outbox'}, source='outbox_reconciliation')
+                dispatcher.delivery_outbox.mark_business_reconciled(item['id'])
+            except Exception:
+                # Leave it unreconciled for a later scheduler pass rather than guessing.
+                continue

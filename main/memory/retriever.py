@@ -12,12 +12,13 @@ class PersonalMemoryRetriever:
         self.semantic_provider = semantic_provider
         self.last_retrieved_ids: list[str] = []
 
-    def retrieve(self, query: str, user_id: str = "local", limit: int = 5) -> list[MemoryRecord]:
+    def retrieve(self, query: str, user_id: str = "local", limit: int = 5, mode: str = "assistant", repository_id: str = "") -> list[MemoryRecord]:
         terms = self.terms(query)
-        candidates = self.manager.repository.search_lexical(user_id, terms, limit=max(limit * 12, 120))
+        visible_ids = {record.id for record in self.manager.list_visible(mode, repository_id=repository_id, user_id=user_id, limit=500)}
+        candidates = [record for record in self.manager.repository.search_lexical(user_id, terms, limit=max(limit * 12, 120)) if record.id in visible_ids]
         if not candidates:
             # A small, approved memory set remains useful when wording has no lexical overlap.
-            candidates = self.manager.list(user_id=user_id, status="active", limit=max(limit * 8, 100))
+            candidates = [record for record in self.manager.list_visible(mode, repository_id=repository_id, user_id=user_id, limit=max(limit * 8, 100))]
         if self.semantic_provider is not None:
             try:
                 semantic_ids = set(self.semantic_provider.search(query, user_id, max(limit * 4, 20)))
@@ -42,8 +43,9 @@ class PersonalMemoryRetriever:
         self.manager.repository.mark_accessed(selected, self.manager.now_iso())
         return selected
 
-    def context(self, query: str, user_id: str = "local", limit: int = 5) -> str:
-        records = self.retrieve(query, user_id=user_id, limit=limit)
+    def context(self, query: str, user_id: str = "local", limit: int = 5, mode: str = "assistant", repository_id: str = "") -> str:
+        if mode == "qa": self.last_retrieved_ids = []; return ""
+        records = self.retrieve(query, user_id=user_id, limit=limit, mode=mode, repository_id=repository_id)
         if not records:
             return ""
         lines = ["<approved_long_term_memories>"]

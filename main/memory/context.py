@@ -13,11 +13,11 @@ class MemoryContextAssembler:
         self.retriever = retriever
         self.last_sources: dict[str, list[str]] = {}
 
-    def assemble(self, query: str, user_id: str = "local") -> str:
+    def assemble(self, query: str, user_id: str = "local", mode: str = "assistant", repository_id: str = "") -> str:
         blocks = [
-            self.conversation.recent_context(),
-            self.conversation.current_daily_context(),
-            self.retriever.context(query, user_id=user_id),
+            self.conversation.recent_context() if mode == "assistant" else "",
+            self.conversation.current_daily_context() if mode == "assistant" else "",
+            self.retriever.context(query, user_id=user_id, mode=mode, repository_id=repository_id),
         ]
         self.last_sources = {
             "factual_message_ids": list(self.conversation.last_recent_ids),

@@ -26,6 +26,19 @@ class AniyaApplication:
     def web_runtime(self): return self._runtime.get_channel_runtime()
     def start_scheduler(self): return self.lifecycle.start_once(self.scheduler.start)
     def stop(self): self.lifecycle.stop(self.scheduler.stop)
+
+    def handle_mode(self, mode: str, text: str, **kwargs):
+        """Backend mode router used by Web/CLI adapters without exposing cross-track state."""
+        if mode == "assistant":
+            return self.assistant.handle(text, **kwargs)
+        if mode == "qa":
+            topic_id = kwargs.get("topic_id") or self.qa.active_topic()
+            return {"topic_id": topic_id, "text": self.qa.ask(text, topic_id)}
+        if mode == "coding":
+            repository_root = kwargs.get("repository_root")
+            if not repository_root: raise ValueError("repository_root is required for coding mode")
+            return self.coding.handle(text, repository_root, kwargs.get("work_session_id", ""))
+        raise ValueError(f"Unsupported conversation mode: {mode}")
     @property
     def memory_admin_dependencies(self):
         return (

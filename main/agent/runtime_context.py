@@ -1,6 +1,7 @@
 import threading
 from dataclasses import dataclass
 from typing import Callable
+from .deadline import RunDeadline
 
 
 _local = threading.local()
@@ -14,6 +15,7 @@ class RuntimeContextState:
     conversations: object
     event_callback: Callable[[str, dict], None] | None = None
     turn_index: int = 0
+    deadline: RunDeadline | None = None
 
 
 def bind_runtime(
@@ -22,6 +24,7 @@ def bind_runtime(
     audit,
     conversations,
     event_callback: Callable[[str, dict], None] | None = None,
+    deadline: RunDeadline | None = None,
 ) -> None:
     _local.state = RuntimeContextState(
         run_id=run_id,
@@ -29,6 +32,7 @@ def bind_runtime(
         audit=audit,
         conversations=conversations,
         event_callback=event_callback,
+        deadline=deadline,
     )
 
 
@@ -38,6 +42,15 @@ def clear_runtime() -> None:
 
 def current_state() -> RuntimeContextState | None:
     return getattr(_local, "state", None)
+
+
+def remaining_seconds(component_timeout: float | None = None) -> float | None:
+    state = current_state()
+    return state.deadline.require_remaining(component_timeout) if state and state.deadline else None
+
+
+def ensure_deadline(component_timeout: float | None = None) -> None:
+    remaining_seconds(component_timeout)
 
 
 def event(event_type: str, payload: dict | None = None) -> None:

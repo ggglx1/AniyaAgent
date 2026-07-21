@@ -4,6 +4,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
+from main.agent import runtime_context as RuntimeContext
 
 
 @dataclass
@@ -54,11 +55,15 @@ class LlmGateway:
         self.start_lane_workers("background", int(os.getenv("LLM_BACKGROUND_WORKERS", "1")))
 
     def create_message(self, *, task_type: str = "main", **kwargs):
+        remaining = RuntimeContext.remaining_seconds()
+        if remaining is not None:
+            kwargs["timeout"] = min(float(kwargs.get("timeout", 120)), remaining)
         sequence = self.next_sequence()
         request = LlmRequest(task_type=task_type, kwargs=kwargs, sequence=sequence)
         lane = self.lane_for_task(task_type)
         self.queues[lane].put((self.priority_for_task(task_type), sequence, request))
-        request.event.wait()
+        if not request.event.wait(timeout=remaining):
+            raise TimeoutError("LLM request exceeded the remaining run deadline")
 
         if request.error is not None:
             raise request.error
@@ -90,6 +95,9 @@ class LlmGateway:
 
             try:
                 kwargs = dict(request.kwargs)
+                remaining = RuntimeContext.remaining_seconds()
+                if remaining is not None:
+                    kwargs["timeout"] = min(float(kwargs.get("timeout", 120)), remaining)
                 kwargs["model"] = self.resolve_model(request.task_type, kwargs.get("model"))
                 waited = time.time() - request.queued_at
                 if waited > 0.25:

@@ -30,14 +30,15 @@ def main() -> None:
     runtime.registry.register(weixin)
     if not weixin.start():
         raise RuntimeError("WeChat sender could not start; scheduler refuses to run without the durable notification channel.")
-    app.start_scheduler()
+    if not app.repository.acquire_scheduler_lease(app.scheduler.worker_id):
+        raise RuntimeError("Another Scheduler instance owns the active lease.")
     print("AniyaAgent scheduler is running.")
     try:
         while True:
             app.scheduler.tick()
             __import__('time').sleep(60)
     except KeyboardInterrupt:
-        app.stop()
+        app.repository.release_scheduler_lease(app.scheduler.worker_id)
         weixin.stop()
 
 

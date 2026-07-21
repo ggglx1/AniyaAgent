@@ -13,6 +13,12 @@ class QaService:
     def new_topic(self) -> str:
         return f"topic_{uuid.uuid4().hex[:12]}"
 
+    def active_topic(self) -> str:
+        tracks = [track for track in self.repository.list_tracks(mode="qa") if track.get("status") == "active"]
+        if not tracks: return self.new_topic()
+        track_id = str(tracks[0]["track_id"])
+        return track_id.split("qa:", 1)[-1]
+
     def ask(self, question: str, topic_id: str, *, context_limit: int = 8) -> str:
         track_id = f"qa:{topic_id}"; expires = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat().replace('+00:00','Z')
         self.repository.append_track_message("user", question, mode="qa", scope_id="knowledge", track_id=track_id, topic_id=topic_id, retention_class="qa_30_days", expires_at=expires)
