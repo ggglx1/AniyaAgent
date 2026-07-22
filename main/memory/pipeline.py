@@ -45,6 +45,8 @@ class StructuredMemoryPipeline:
                 continue
             decision = self.policy.decide(candidate)
             scope = self.scope_for(mode, repository_id, candidate)
+            candidate["scope"] = scope
+            candidate["repository_id"] = repository_id
             if decision == "route_profile":
                 self.update_profile(candidate)
                 continue

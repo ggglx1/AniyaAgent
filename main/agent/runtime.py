@@ -186,12 +186,28 @@ class AgentRuntime:
                     "traceback": traceback.format_exc(),
                 },
             )
+            # A failed run must still leave a clean next-run recovery source.
+            if "messages" in locals():
+                try:
+                    self.ensure_clean_or_recover(session_id, run_id, messages)
+                    self.conversations.save_working(session_id, messages)
+                    self.audit.write(run_id, "context.recovered_after_failure", {"messages": len(messages)})
+                except Exception:
+                    fallback = self.conversations.load_last_known_good(session_id)
+                    if fallback:
+                        self.conversations.save_working(session_id, fallback)
             return result
         finally:
             clear_runtime()
             lock.release()
 
     def load_clean_context(self, session_id: str, run_id: str) -> list:
+        # A failed run writes its repaired state to working.json. Prefer it when it
+        # validates, so the next run cannot repeatedly reload the old broken history.
+        working = self.conversations.load_working(session_id)
+        if working and self.integrity.validate(working).valid:
+            self.audit.write(run_id, "context.resumed_working", {"messages": len(working)})
+            return working
         messages = self.conversations.load(session_id)
         report = self.integrity.validate(messages)
         if report.valid: return messages

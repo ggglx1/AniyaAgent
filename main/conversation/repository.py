@@ -109,6 +109,19 @@ class ConversationMemoryRepository:
         opened again. New code uses the v2 tables and old personal data is copied once.
         """
         connection.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL, details TEXT NOT NULL DEFAULT '')")
+        # Operational tables may be introduced after the v2 data migration. They must
+        # be ensured on every startup instead of being hidden behind the migration gate.
+        connection.executescript("""
+            CREATE TABLE IF NOT EXISTS maintenance_requests (
+                id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload_json TEXT NOT NULL DEFAULT '{}', state TEXT NOT NULL DEFAULT 'pending',
+                worker_id TEXT NOT NULL DEFAULT '', claim_token TEXT NOT NULL DEFAULT '', lease_expires_at TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_maintenance_claim ON maintenance_requests(state, lease_expires_at, created_at);
+            CREATE TABLE IF NOT EXISTS scheduler_lease (
+                lease_name TEXT PRIMARY KEY, worker_id TEXT NOT NULL, expires_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+        """)
         version = connection.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()[0]
         if version >= 2:
             return
@@ -182,6 +195,12 @@ class ConversationMemoryRepository:
         args.append(max(1, min(limit, 500)))
         with self.connect() as connection:
             rows = connection.execute(f"SELECT * FROM conversation_track_messages WHERE {' AND '.join(conditions)} ORDER BY track_sequence DESC LIMIT ?", args).fetchall()
+        return [self.to_track_message(row) for row in reversed(rows)]
+
+    def search_track_messages(self, query: str, *, mode: str = "assistant", limit: int = 50, owner_id: str = "local") -> list[ConversationMessage]:
+        if not query.strip(): return []
+        with self.connect() as connection:
+            rows = connection.execute("SELECT * FROM conversation_track_messages WHERE owner_id=? AND mode=? AND redacted_at='' AND content_json LIKE ? ORDER BY sequence DESC LIMIT ?", (owner_id, mode, f"%{query.strip()}%", max(1, min(limit, 200)))).fetchall()
         return [self.to_track_message(row) for row in reversed(rows)]
 
     def list_tracks(self, owner_id: str = 'local', mode: str = '') -> list[dict]:

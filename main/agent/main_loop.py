@@ -363,6 +363,13 @@ def run_tool_turn(
     if response.stop_reason != "tool_use":
         return False, set()
 
+    tool_blocks = [block for block in response.content if getattr(block, "type", "") == "tool_use"]
+    compact_blocks = [block for block in tool_blocks if block.name == "compact"]
+    # compact is a control action. Reject mixed tool rounds so no sibling call loses its result.
+    if compact_blocks and len(tool_blocks) != 1:
+        messages.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": block.id, "content": "compact must be the only tool call in this turn; call it alone after other tools finish.", "is_error": True} for block in tool_blocks]})
+        return True, {block.name for block in tool_blocks}
+
     used_tools = set()
     results = []
     for block in response.content:

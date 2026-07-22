@@ -1,6 +1,6 @@
 type ConversationMode = 'assistant' | 'coding' | 'qa';
 type MessageRole = 'user' | 'assistant' | 'tool' | 'system' | 'log' | 'error';
-type ConnectionState = 'pending' | 'connected' | 'busy' | 'offline';
+type ConnectionState = 'pending' | 'connected' | 'busy' | 'recovering' | 'failed' | 'offline';
 type DrawerView = 'plans' | 'notifications' | 'daily' | 'memory' | 'binding';
 
 type TrackDescriptor = {
@@ -28,9 +28,21 @@ type ChannelInfo = { channel_id: string; kind: string; trust_level: string };
 type ModelProvider = { name: string; configured: boolean; active: boolean; base_url: string; model: string };
 type ModelProvidersPayload = { active: string; providers: ModelProvider[] };
 
+type RunStatus = 'accepted' | 'queued' | 'running' | 'waiting_permission' | 'reconnecting' | 'completed' | 'failed' | 'cancelled' | 'timed_out' | 'unknown';
+type RunSnapshot = {
+  requestId: string;
+  status: RunStatus;
+  lastEventId: number;
+  track: Partial<TrackDescriptor>;
+  finalContent?: string;
+  errorCode?: string;
+  errorMessage?: string;
+};
+
 type WsMessage =
   | { type: 'connection.ready'; data: { clientId: string } }
   | { type: 'agent.status'; data: { status: string } }
+  | { type: 'agent.run'; data: RunSnapshot }
   | { type: 'agent.output'; data: { role: 'assistant' | 'log' | 'error'; content: string } }
   | { type: 'agent.permission'; data: { requestId: string; tool: string; reason: string; input: unknown } }
   | { type: 'channels.list'; data: { channels: ChannelInfo[] } }
@@ -91,7 +103,7 @@ const allowButton = document.querySelector<HTMLButtonElement>('#allow')!;
 const denyButton = document.querySelector<HTMLButtonElement>('#deny')!;
 
 const roleLabels: Record<MessageRole, string> = {
-  user: '你', assistant: 'Aniya', tool: '处理记录', system: '系统', log: '动态', error: '连接',
+  user: '你', assistant: 'Aniya', tool: '处理记录', system: '系统', log: '动态', error: '未完成',
 };
 const roleMarks: Record<MessageRole, string> = {
   user: '你', assistant: 'A', tool: '·', system: '·', log: '·', error: '!',
@@ -112,6 +124,8 @@ let records: ConversationMessage[] = [];
 let hasMore = false;
 let drawerView: DrawerView = 'plans';
 let transientCounter = 0;
+const activeRunStorageKey = 'aniya_active_run';
+let activeRun: RunSnapshot | null = loadStoredRun();
 
 function defaultTrack(mode: ConversationMode): TrackDescriptor {
   return {
@@ -121,6 +135,24 @@ function defaultTrack(mode: ConversationMode): TrackDescriptor {
     repository_id: '', work_session_id: '', topic_id: '',
     can_send: mode === 'assistant', unavailable_reason: '',
   };
+}
+
+function loadStoredRun(): RunSnapshot | null {
+  try {
+    const raw = localStorage.getItem(activeRunStorageKey);
+    if (!raw) return null;
+    const value = JSON.parse(raw) as RunSnapshot;
+    return value.requestId ? value : null;
+  } catch {
+    localStorage.removeItem(activeRunStorageKey);
+    return null;
+  }
+}
+
+function storeRun(run: RunSnapshot | null): void {
+  activeRun = run;
+  if (run) localStorage.setItem(activeRunStorageKey, JSON.stringify(run));
+  else localStorage.removeItem(activeRunStorageKey);
 }
 
 async function api<T>(pathname: string, init?: RequestInit): Promise<T> {
@@ -249,17 +281,47 @@ function connect(): void {
   ws.onopen = () => { connected = true; send({ type: 'channels.list' }); send({ type: 'models.list' }); };
   ws.onmessage = (event) => handleWsMessage(JSON.parse(String(event.data)) as WsMessage);
   ws.onclose = () => {
-    connected = false; busy = false; finishChannelRefresh(); clearActivity(); setStatus('reconnecting', 'offline'); updateComposerAvailability();
+    connected = false; busy = Boolean(activeRun); finishChannelRefresh();
+    if (activeRun) {
+      setActivity('连接中断，正在恢复…');
+      setStatus('reconnecting', 'recovering');
+    } else {
+      clearActivity(); setStatus('reconnecting', 'offline');
+    }
+    updateComposerAvailability();
     reconnectTimer = window.setTimeout(connect, 1500);
   };
   ws.onerror = () => setStatus('error', 'offline');
 }
 
 function handleWsMessage(message: WsMessage): void {
-  if (message.type === 'connection.ready') { setStatus('ready', 'connected'); requestChannels(); requestModels(); return; }
+  if (message.type === 'connection.ready') {
+    connected = true;
+    requestChannels(); requestModels();
+    if (activeRun) {
+      busy = true;
+      setStatus('reconnecting', 'recovering');
+      send({ type: 'agent.resume', data: { requestId: activeRun.requestId, lastEventId: activeRun.lastEventId, track: activeRun.track } });
+    } else setStatus('ready', 'connected');
+    return;
+  }
+  if (message.type === 'agent.run') {
+    handleRunSnapshot(message.data);
+    return;
+  }
   if (message.type === 'agent.status') {
-    busy = message.data.status === 'busy';
-    setStatus(message.data.status, busy ? 'busy' : message.data.status === 'ready' || message.data.status === 'completed' ? 'connected' : 'offline');
+    const status = message.data.status;
+    busy = ['busy', 'running', 'accepted', 'queued', 'waiting_permission', 'reconnecting'].includes(status);
+    const state: ConnectionState = status === 'reconnecting'
+      ? 'recovering'
+      : busy
+        ? 'busy'
+        : ['ready', 'completed'].includes(status)
+          ? 'connected'
+          : ['failed', 'cancelled', 'timed_out'].includes(status)
+            ? 'failed'
+            : 'offline';
+    setStatus(status, state);
     if (!busy) { clearActivity(700); }
     updateComposerAvailability();
     return;
@@ -284,6 +346,33 @@ function handleWsMessage(message: WsMessage): void {
     permissionInput.textContent = JSON.stringify(message.data.input, null, 2);
     permission.classList.remove('hidden'); allowButton.focus();
   }
+}
+
+function handleRunSnapshot(run: RunSnapshot): void {
+  if (['completed', 'failed', 'cancelled', 'timed_out', 'unknown'].includes(run.status)) {
+    storeRun(null);
+    busy = false;
+    if (run.status === 'completed') {
+      setStatus('completed', 'connected');
+      clearActivity(500);
+    } else if (run.status === 'unknown') {
+      setStatus('unknown', 'failed');
+      setActivity('上一次运行状态无法确认', 2600);
+    } else {
+      setStatus(run.status, 'failed');
+      clearActivity(500);
+    }
+  } else {
+    storeRun(run);
+    busy = true;
+    if (run.status === 'reconnecting') {
+      setStatus('reconnecting', 'recovering');
+      setActivity('连接中断，正在恢复…');
+    } else {
+      setStatus(run.status, 'busy');
+    }
+  }
+  updateComposerAvailability();
 }
 
 function addTransient(role: 'assistant' | 'error', content: string): void {
@@ -363,15 +452,17 @@ function setWelcome(): void {
 
 function setStatus(status: string, state: ConnectionState): void {
   statusEl.textContent = formatStatus(status); statusBadge.className = `status-badge ${state}`;
-  dot.className = `dot ${state === 'connected' || state === 'busy' ? 'connected' : state === 'offline' ? 'offline' : ''}`;
+  dot.className = `dot ${state === 'connected' || state === 'busy' ? 'connected' : state === 'offline' || state === 'failed' ? 'offline' : state === 'recovering' ? 'recovering' : ''}`;
   if (state === 'busy') presenceStatus.textContent = '正在专注处理';
+  else if (state === 'recovering') presenceStatus.textContent = '连接中断，正在恢复';
+  else if (state === 'failed') presenceStatus.textContent = '这次没有处理完成';
   else if (state === 'offline') presenceStatus.textContent = '正在等待重新连接';
   else if (state === 'connected') presenceStatus.textContent = '已同步你的私人空间';
 }
 
 function formatStatus(status: string): string {
   if (status.startsWith('starting')) return '正在醒来';
-  return ({ connecting: '正在醒来', reconnecting: '正在回来', ready: '在你身边', busy: '正在处理', offline: '暂时离开', error: '连接异常', completed: '在你身边' } as Record<string, string>)[status] || status;
+  return ({ connecting: '正在醒来', reconnecting: '正在恢复', running: '正在处理', accepted: '正在处理', queued: '等待处理', waiting_permission: '等待确认', ready: '在你身边', busy: '正在处理', offline: '暂时离开', error: '连接异常', completed: '在你身边', failed: '处理失败', cancelled: '已取消', timed_out: '处理超时', unknown: '状态未知' } as Record<string, string>)[status] || status;
 }
 
 function setActivity(text: string, autoHideMs = 0): void {
@@ -697,6 +788,7 @@ function showConversationError(error: unknown): void { addTransient('error', err
 form.addEventListener('submit', (event) => {
   event.preventDefault(); const content = input.value.trim();
   if (!content || sendButton.disabled || !send({ type: 'agent.send', data: { content, track: currentTrack } })) return;
+  storeRun(null);
   records.push({ message_id: `temp_user_${++transientCounter}`, role: 'user', content, created_at: new Date().toISOString(), day_date: '', track_sequence: Number.MAX_SAFE_INTEGER - transientCounter });
   renderMessages(); messagesEl.scrollTop = messagesEl.scrollHeight; input.value = ''; resizeInput(); setActivity('正在理解你的话…'); busy = true; setStatus('busy', 'busy'); updateComposerAvailability();
 });

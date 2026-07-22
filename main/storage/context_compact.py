@@ -47,12 +47,12 @@ class ContextCompactor:
         head, tail = [], []
         head_size = 0
         for unit in units:
-            if head_size + len(unit) > 3: break
-            head.append(unit); head_size += len(unit)
+            if head_size + len(unit.messages) > 3: break
+            head.append(unit); head_size += len(unit.messages)
         tail_size = 0
         for unit in reversed(units[len(head):]):
-            if head_size + tail_size + len(unit) > max_messages - 1: break
-            tail.append(unit); tail_size += len(unit)
+            if head_size + tail_size + len(unit.messages) > max_messages - 1: break
+            tail.append(unit); tail_size += len(unit.messages)
         kept = len(head) + len(tail)
         omitted = max(0, len(units) - kept)
         return self.integrity.flatten(head) + [{"role": "user", "content": f"[snipped {omitted} complete conversation units]"}] + self.integrity.flatten(list(reversed(tail)))
@@ -437,13 +437,14 @@ class ContextCompactor:
         return self.validated(compacted)
 
     def first_preserved_message(self, messages: list) -> dict | None:
-        if not messages:
+        units = self.integrity.units(messages)
+        if not units:
             return None
-        return self.safe_message_copy(
-            messages[0],
-            max_chars=4000,
-            notice="[First message preserved but truncated]",
-        )
+        first = units[0]
+        if first.kind == "tool_transaction":
+            # Never return only the assistant half of the first transaction.
+            return None
+        return self.safe_message_copy(first.messages[0], max_chars=4000, notice="[First message preserved but truncated]")
 
     def recent_messages(self, messages: list, count: int, skip_first: bool = False) -> list:
         if count <= 0:
@@ -453,9 +454,9 @@ class ContextCompactor:
         if skip_first and units: units = units[1:]
         selected, used = [], 0
         for unit in reversed(units):
-            if selected and used + len(unit) > count: break
-            selected.append(unit); used += len(unit)
-        return [self.safe_message_copy(message, max_chars=8000) for unit in reversed(selected) for message in unit]
+            if selected and used + len(unit.messages) > count: break
+            selected.append(unit); used += len(unit.messages)
+        return [self.safe_message_copy(message, max_chars=8000) for unit in reversed(selected) for message in unit.messages]
 
     def validated(self, messages: list) -> list:
         report = self.integrity.validate(messages)

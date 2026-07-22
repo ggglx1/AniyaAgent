@@ -1,606 +1,176 @@
-import json
+from __future__ import annotations
+
 import queue
 import threading
 import time
-import traceback
 import uuid
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
-from urllib.parse import parse_qs, urlparse
+from typing import Any, Iterator
 
 from .base import AgentResponse, ChannelMessage, ChannelSendResult
 from .runtime import ChannelRuntime
 from .types import ChannelKind, TrustLevel
+from main.application.run_events import RunEventStore
 
 
 class WebChannel:
-    def __init__(
-        self,
-        channel_runtime: ChannelRuntime,
-        channel_id: str = "web",
-        host: str = "127.0.0.1",
-        port: int = 9528,
-        auth_token: str = "",
-        permission_timeout_seconds: int = 300,
-        llm_control=None,
-        memory_admin=None,
-        application=None,
-    ):
-        self.channel_runtime = channel_runtime
-        self.channel_id = channel_id
-        self.kind = ChannelKind.WEB
-        self.trust_level = TrustLevel.HIGH
-        self.host = host
-        self.port = port
-        self.auth_token = auth_token
-        self.permission_timeout_seconds = permission_timeout_seconds
-        self.llm_control = llm_control
-        self.memory_admin = memory_admin
-        self.application = application
-        self.queues: dict[str, queue.Queue[dict]] = {}
-        self.request_sessions: dict[str, str] = {}
-        self.conversation_requests: dict[str, str] = {}
-        self.permission_replies: dict[str, queue.Queue[bool]] = {}
-        self._server: ThreadingHTTPServer | None = None
-        self._server_thread: threading.Thread | None = None
-        self._lock = threading.Lock()
-        self._local = threading.local()
+    """HTTP-independent bridge for Web requests, SSE queues and permission replies."""
 
-    @property
-    def base_url(self) -> str:
-        return f"http://{self.host}:{self.port}"
-
-    def start(self) -> None:
-        if self._server is not None:
-            return
-        handler = self._make_handler()
-        self._server = ThreadingHTTPServer((self.host, self.port), handler)
-        self._server_thread = threading.Thread(
-            target=self._server.serve_forever,
-            daemon=True,
-            name="aniyaagent-web-channel",
-        )
-        self._server_thread.start()
-
-    def serve_forever(self) -> None:
-        if self._server is None:
-            handler = self._make_handler()
-            self._server = ThreadingHTTPServer((self.host, self.port), handler)
-        self._server.serve_forever()
-
-    def stop(self) -> None:
-        server = self._server
-        if server is None:
-            return
-        server.shutdown()
-        server.server_close()
-        self._server = None
+    def __init__(self, channel_runtime: ChannelRuntime, channel_id: str = "web", *, auth_token: str = "", permission_timeout_seconds: int = 300, llm_control=None, memory_admin=None, application=None):
+        self.channel_runtime = channel_runtime; self.channel_id = channel_id; self.kind = ChannelKind.WEB; self.trust_level = TrustLevel.HIGH
+        self.auth_token = auth_token; self.permission_timeout_seconds = permission_timeout_seconds; self.llm_control = llm_control; self.memory_admin = memory_admin; self.application = application
+        self.request_sessions: dict[str, str] = {}; self.conversation_requests: dict[str, str] = {}; self.permission_replies: dict[str, queue.Queue[bool]] = {}; self.permission_runs: dict[str, str] = {}
+        self._lock = threading.RLock(); self._local = threading.local()
+        self.run_events = RunEventStore(channel_runtime.agent_runtime.workdir)
 
     def submit_message(self, payload: dict[str, Any]) -> dict[str, Any]:
         text = str(payload.get("text") or payload.get("content") or payload.get("message") or "").strip()
-        if not text:
-            return {"ok": False, "error": "Message text is required."}
-
+        if not text: return {"ok": False, "error": "Message text is required."}
         track = self.resolve_track(payload, create=True)
-        if not track["can_send"]:
-            return {"ok": False, "error": track["unavailable_reason"], "track": track}
-
+        if not track["can_send"]: return {"ok": False, "error": track["unavailable_reason"], "track": track}
         conversation_id = "personal" if track["mode"] == "assistant" else track["track_id"]
-        user_id = "local"
         request_id = uuid.uuid4().hex
-        event_queue: queue.Queue[dict] = queue.Queue()
-
         with self._lock:
-            self.queues[request_id] = event_queue
-            self.request_sessions[request_id] = conversation_id
-            self.conversation_requests[conversation_id] = request_id
-
-        metadata = dict(payload.get("metadata") or {})
-        metadata.update({key: track[key] for key in ("mode", "scope_id", "track_id", "repository_id", "work_session_id", "topic_id")})
-        message = ChannelMessage(
-            channel_id=self.channel_id,
-            user_id=user_id,
-            conversation_id=conversation_id,
-            text=text,
-            kind=ChannelKind.WEB,
-            trust_level=TrustLevel.HIGH,
-            files=list(payload.get("files") or []),
-            images=list(payload.get("images") or []),
-            metadata=metadata,
-        )
-        threading.Thread(
-            target=self._run_request,
-            args=(request_id, message, track),
-            daemon=True,
-            name=f"web-channel-request-{request_id[:8]}",
-        ).start()
-        return {
-            "ok": True,
-            "request_id": request_id,
-            "conversation_id": conversation_id,
-            "track": track,
-            "stream_url": f"/stream?request_id={request_id}",
-        }
+            self.request_sessions[request_id] = conversation_id; self.conversation_requests[conversation_id] = request_id
+        self.run_events.create(request_id, conversation_id, track["track_id"])
+        metadata = {**dict(payload.get("metadata") or {}), **{key: track[key] for key in ("mode", "scope_id", "track_id", "repository_id", "work_session_id", "topic_id")}}
+        attachment_ids = [str(item) for item in payload.get("attachment_ids", [])]
+        if attachment_ids and self.application is not None:
+            attachment_text, attachment_images = self.application.attachments.context(attachment_ids)
+            if attachment_text:
+                text = f"{text}\n\n<attached_context>\n{attachment_text}\n</attached_context>"
+            metadata["attachment_ids"] = attachment_ids
+            metadata["attachment_images"] = attachment_images
+        message = ChannelMessage(self.channel_id, "local", conversation_id, text, ChannelKind.WEB, TrustLevel.HIGH, list(payload.get("files") or []), list(payload.get("images") or []) + metadata.get("attachment_images", []), metadata)
+        threading.Thread(target=self._run_request, args=(request_id, message, track), daemon=True, name=f"web-request-{request_id[:8]}").start()
+        return {"ok": True, "request_id": request_id, "conversation_id": conversation_id, "track": track, "stream_url": f"/stream?request_id={request_id}"}
 
     def resolve_track(self, payload: dict[str, Any], create: bool = False, force_new: bool = False) -> dict[str, Any]:
-        mode = str(payload.get("mode") or "assistant").strip().lower()
-        if mode not in {"assistant", "coding", "qa"}:
-            raise ValueError(f"Unsupported conversation mode: {mode}")
-
-        if mode == "assistant":
-            return {
-                "mode": "assistant", "scope_id": "personal", "track_id": "assistant:personal",
-                "repository_id": "", "work_session_id": "", "topic_id": "",
-                "can_send": True, "unavailable_reason": "",
-            }
-
-        if self.application is None:
-            return {
-                "mode": mode, "scope_id": "knowledge" if mode == "qa" else "",
-                "track_id": "", "repository_id": "", "work_session_id": "", "topic_id": "",
-                "can_send": False, "unavailable_reason": "当前 Web 运行时尚未装配该对话轨道。",
-            }
-
+        mode = str(payload.get("mode") or "assistant").lower()
+        if mode not in {"assistant", "coding", "qa"}: raise ValueError("Unsupported conversation mode")
+        if mode == "assistant": return {"mode":"assistant","scope_id":"personal","track_id":"assistant:personal","repository_id":"","work_session_id":"","topic_id":"","can_send":True,"unavailable_reason":""}
+        if self.application is None: return {"mode":mode,"scope_id":"","track_id":"","repository_id":"","work_session_id":"","topic_id":"","can_send":False,"unavailable_reason":"Application is unavailable."}
         if mode == "qa":
-            topic_id = str(payload.get("topic_id") or "").strip()
-            if force_new:
-                topic_id = ""
-            if not topic_id:
-                tracks = self.application.repository.list_tracks(mode="qa")
-                if tracks and not force_new:
-                    topic_id = str(tracks[0].get("topic_id") or "")
-                if not topic_id and create:
-                    topic_id = self.application.qa.new_topic()
-            return {
-                "mode": "qa", "scope_id": "knowledge", "track_id": f"qa:{topic_id}" if topic_id else "",
-                "repository_id": "", "work_session_id": "", "topic_id": topic_id,
-                "can_send": bool(topic_id), "unavailable_reason": "无法创建知识问答主题。" if not topic_id else "",
-            }
-
-        repository_root = str(payload.get("repository_root") or self.application.coding.workdir)
-        repository_id = str(payload.get("repository_id") or "").strip()
-        work_session_id = str(payload.get("work_session_id") or "").strip()
-        if not repository_id:
-            repository_id = self.application.coding.repository_id(repository_root)
-        if force_new:
-            work_session_id = ""
-        if not work_session_id:
-            tracks = [
-                item for item in self.application.repository.list_tracks(mode="coding")
-                if str(item.get("repository_id") or "") == repository_id
-            ]
-            if tracks and not force_new:
-                work_session_id = str(tracks[0].get("work_session_id") or "")
-            if not work_session_id and create:
-                created = self.application.coding.new_work_session(repository_root)
-                repository_id = created["repository_id"]
-                work_session_id = created["work_session_id"]
-        track_id = f"coding:{repository_id}:{work_session_id}" if work_session_id else ""
-        can_send = callable(getattr(self.application.coding, "handle", None))
-        return {
-            "mode": "coding", "scope_id": repository_id, "track_id": track_id,
-            "repository_id": repository_id, "work_session_id": work_session_id, "topic_id": "",
-            "can_send": can_send,
-            "unavailable_reason": "Coding 轨道的数据边界已就绪，但 Coding Runtime 尚未接入 Web。" if not can_send else "",
-        }
+            topic_id = "" if force_new else str(payload.get("topic_id") or self.application.qa.active_topic())
+            if not topic_id and create: topic_id = self.application.qa.new_topic()
+            return {"mode":"qa","scope_id":"knowledge","track_id":f"qa:{topic_id}","repository_id":"","work_session_id":"","topic_id":topic_id,"can_send":bool(topic_id),"unavailable_reason":"Unable to create Q&A topic."}
+        root = str(payload.get("repository_root") or self.application.coding.workdir); repository_id = self.application.coding.repository_id(root)
+        session_id = "" if force_new else str(payload.get("work_session_id") or "")
+        if not session_id and create: session_id = self.application.coding.new_work_session(root)["work_session_id"]
+        return {"mode":"coding","scope_id":repository_id,"track_id":f"coding:{repository_id}:{session_id}","repository_id":repository_id,"work_session_id":session_id,"topic_id":"","repository_root":root,"can_send":bool(session_id),"unavailable_reason":"Unable to create coding work session."}
 
     def send(self, response: AgentResponse) -> ChannelSendResult:
-        request_id = self.conversation_requests.get(response.conversation_id)
-        if not request_id:
-            # In-app delivery is only durable when a notification store records it.
-            return ChannelSendResult(False, "no active Web stream; not a durable delivery target")
-        self._enqueue(
-            request_id,
-            {
-                "type": "response",
-                "conversation_id": response.conversation_id,
-                "run_id": response.run_id,
-                "status": response.status,
-                "content": response.text,
-                "error": response.error,
-                "metadata": response.metadata,
-            },
-        )
+        with self._lock: request_id = self.conversation_requests.get(response.conversation_id)
+        if not request_id: return ChannelSendResult(False, "no active Web stream; not a durable delivery target")
+        self._enqueue(request_id, {"type":"response","conversation_id":response.conversation_id,"run_id":response.run_id,"status":response.status,"content":response.text,"error":response.error,"metadata":response.metadata})
         return ChannelSendResult(True, "queued")
 
     def ask_user(self, block, reason: str) -> bool:
         request_id = getattr(self._local, "request_id", "")
-        if not request_id:
-            return False
-
-        permission_id = f"perm_{uuid.uuid4().hex[:12]}"
-        reply_queue: queue.Queue[bool] = queue.Queue(maxsize=1)
-        self.permission_replies[permission_id] = reply_queue
-        self._enqueue(
-            request_id,
-            {
-                "type": "permission_request",
-                "request_id": permission_id,
-                "tool": str(getattr(block, "name", "")),
-                "reason": reason,
-                "input": dict(getattr(block, "input", {}) or {}),
-            },
-        )
-        try:
-            return bool(reply_queue.get(timeout=self.permission_timeout_seconds))
-        except queue.Empty:
-            return False
+        if not request_id: return False
+        permission_id = f"perm_{uuid.uuid4().hex[:12]}"; reply_queue: queue.Queue[bool] = queue.Queue(maxsize=1)
+        with self._lock:
+            self.permission_replies[permission_id] = reply_queue
+            self.permission_runs[permission_id] = request_id
+        self._enqueue(request_id, {"type":"permission_request","request_id":permission_id,"tool":str(getattr(block,"name", "")),"reason":reason,"input":dict(getattr(block,"input",{}) or {})})
+        try: return bool(reply_queue.get(timeout=self.permission_timeout_seconds))
+        except queue.Empty: return False
         finally:
-            self.permission_replies.pop(permission_id, None)
+            with self._lock:
+                self.permission_replies.pop(permission_id, None)
+                self.permission_runs.pop(permission_id, None)
 
     def answer_permission(self, permission_id: str, allow: bool) -> bool:
-        reply_queue = self.permission_replies.get(permission_id)
-        if reply_queue is None:
-            return False
-        reply_queue.put(bool(allow))
-        return True
+        with self._lock:
+            reply = self.permission_replies.get(permission_id)
+            run_id = self.permission_runs.get(permission_id, "")
+        if reply is None: return False
+        try:
+            reply.put_nowait(bool(allow))
+            if run_id: self.run_events.publish(run_id, "running", {"permission_id": permission_id, "allow": bool(allow)})
+            return True
+        except queue.Full: return False
 
-    def stream(self, request_id: str):
-        event_queue = self.queues.get(request_id)
-        if event_queue is None:
-            yield {"type": "error", "error": f"Unknown request_id: {request_id}"}
+    def stream(self, request_id: str, after_sequence: int = 0) -> Iterator[dict]:
+        last_event_id = max(0, int(after_sequence))
+        if self.run_events.state(request_id) is None:
+            yield {"type":"error","error":"Unknown request_id"}
             return
-
         while True:
-            try:
-                event = event_queue.get(timeout=15)
-            except queue.Empty:
-                yield {"type": "ping", "time": time.time()}
+            events = self.run_events.wait_for_events(request_id, last_event_id, timeout=15)
+            if events:
+                for event in events:
+                    last_event_id = max(last_event_id, int(event.get("event_id") or 0))
+                    yield event
+                    if event.get("type") in {"completed", "failed", "cancelled", "timed_out"}:
+                        return
                 continue
-            yield event
-            if event.get("type") in {"done", "error"}:
-                with self._lock:
-                    conversation_id = self.request_sessions.pop(request_id, "")
-                    if conversation_id and self.conversation_requests.get(conversation_id) == request_id:
-                        self.conversation_requests.pop(conversation_id, None)
-                    self.queues.pop(request_id, None)
+            state = self.run_events.state(request_id)
+            if state is None:
+                yield {"type":"error","error":"Unknown request_id"}
                 return
+            if state["status"] in {"completed", "failed", "cancelled", "timed_out"}:
+                return
+            yield {"type":"ping", "time":time.time()}
+
+    def cleanup_request(self, request_id: str) -> None:
+        with self._lock:
+            if request_id == "*":
+                self.request_sessions.clear(); self.conversation_requests.clear(); self.permission_replies.clear(); self.permission_runs.clear(); return
+            conversation = self.request_sessions.pop(request_id, "")
+            if conversation and self.conversation_requests.get(conversation) == request_id: self.conversation_requests.pop(conversation, None)
+
+    def close(self) -> None:
+        self.cleanup_request("*")
+
+    def cancel_run(self, run_id: str) -> bool:
+        return self.run_events.cancel(run_id)
+
+    def run_state(self, run_id: str) -> dict | None:
+        return self.run_events.state(run_id)
+
+    def active_runs(self, conversation_id: str = "") -> list[dict]:
+        return self.run_events.active(conversation_id)
 
     def _run_request(self, request_id: str, message: ChannelMessage, track: dict[str, Any]) -> None:
         self._local.request_id = request_id
-        self._enqueue(request_id, {"type": "accepted", "request_id": request_id, "conversation_id": message.conversation_id, "track": track})
+        self.run_events.publish(request_id, "running", {"track": track})
         try:
             if track["mode"] == "qa":
-                content = self.application.qa.ask(message.text, track["topic_id"])
-                response = AgentResponse(self.channel_id, message.conversation_id, request_id, "completed", content)
+                text = self.application.qa.ask(message.text, track["topic_id"]); response = AgentResponse(self.channel_id, message.conversation_id, request_id, "completed", text)
             elif track["mode"] == "coding":
-                response = self.application.coding.handle(
-                    message.text,
-                    repository_id=track["repository_id"],
-                    work_session_id=track["work_session_id"],
-                    event_callback=lambda event_type, payload: self._on_runtime_event(request_id, event_type, payload),
-                )
+                result = self.application.coding.handle(message.text, track["repository_root"], track["work_session_id"]); response = AgentResponse(self.channel_id, message.conversation_id, request_id, "completed", result["text"], metadata=result)
             else:
-                response = self.channel_runtime.handle_message(
-                    message,
-                    deliver=False,
-                    event_callback=lambda event_type, payload: self._on_runtime_event(request_id, event_type, payload),
+                response = self.channel_runtime.handle_message(message, deliver=False, event_callback=lambda kind, payload: self._on_runtime_event(request_id, kind, payload))
+            if self.run_events.is_cancelled(request_id):
+                self.run_events.finish(request_id, "cancelled", error_code="user_requested", error_message="Run cancelled", payload={"track": track, "runtime_run_id": response.run_id})
+            else:
+                status = str(response.status or "failed").lower()
+                if status == "completed":
+                    terminal = "completed"
+                elif status in {"cancelled", "timed_out"}:
+                    terminal = status
+                else:
+                    terminal = "failed"
+                self.run_events.finish(
+                    request_id,
+                    terminal,
+                    content=response.text if terminal == "completed" else "",
+                    error_code="" if terminal == "completed" else status,
+                    error_message=response.error if terminal != "completed" else "",
+                    metadata=response.metadata,
+                    payload={"track": track, "runtime_run_id": response.run_id},
                 )
-            self._enqueue(
-                request_id,
-                {
-                    "type": "done",
-                    "request_id": request_id,
-                    "conversation_id": message.conversation_id,
-                    "run_id": response.run_id,
-                    "status": response.status,
-                    "content": response.text,
-                    "error": response.error,
-                    "metadata": response.metadata,
-                    "track": track,
-                },
-            )
         except Exception as exc:
-            self._enqueue(
-                request_id,
-                {
-                    "type": "error",
-                    "request_id": request_id,
-                    "error": f"{type(exc).__name__}: {exc}",
-                    "traceback": traceback.format_exc(),
-                },
-            )
+            self.run_events.finish(request_id, "failed", error_code=type(exc).__name__, error_message=f"{type(exc).__name__}: {exc}", payload={"track": track})
         finally:
             self._local.request_id = ""
+            self.cleanup_request(request_id)
 
     def _on_runtime_event(self, request_id: str, event_type: str, payload: dict | None) -> None:
-        self._enqueue(request_id, self._map_runtime_event(event_type, payload or {}))
-
-    def _map_runtime_event(self, event_type: str, payload: dict) -> dict:
-        mapped_type = {
-            "loop.turn.started": "phase",
-            "loop.turn.completed": "phase",
-            "loop.turn.failed": "phase",
-            "llm.request.started": "llm_start",
-            "llm.request.completed": "llm_end",
-            "llm.request.failed": "llm_error",
-            "tool.call.started": "tool_start",
-            "tool.call.completed": "tool_end",
-            "tool.call.blocked": "tool_blocked",
-            "checkpoint.saved": "checkpoint",
-        }.get(event_type, "event")
-        return {"type": mapped_type, "event": event_type, "data": payload}
+        mapped = {"loop.turn.started":"phase","loop.turn.completed":"phase","loop.turn.failed":"phase","llm.request.started":"llm_start","llm.request.completed":"llm_end","llm.request.failed":"llm_error","tool.call.started":"tool_start","tool.call.completed":"tool_end","tool.call.blocked":"tool_blocked","checkpoint.saved":"checkpoint"}.get(event_type,"event")
+        self._enqueue(request_id, {"type":mapped,"event":event_type,"data":payload or {}})
 
     def _enqueue(self, request_id: str, event: dict) -> None:
-        event_queue = self.queues.get(request_id)
-        if event_queue is not None:
-            event_queue.put(event)
-
-    def _make_handler(self):
-        channel = self
-
-        class Handler(BaseHTTPRequestHandler):
-            protocol_version = "HTTP/1.1"
-
-            def do_OPTIONS(self):
-                self._send_empty(204)
-
-            def do_GET(self):
-                parsed = urlparse(self.path)
-                if parsed.path == "/health":
-                    self._send_json({"ok": True, "channel": channel.channel_id})
-                    return
-                if parsed.path == "/channels":
-                    if not self._authorized():
-                        self._send_json({"ok": False, "error": "Unauthorized"}, status=401)
-                        return
-                    self._send_json({"ok": True, "channels": channel.channel_runtime.registry.list_channels()})
-                    return
-                if parsed.path == "/conversation/state":
-                    if not self._authorized():
-                        self._send_json({"ok": False, "error": "Unauthorized"}, status=401)
-                        return
-                    try:
-                        modes = [channel.resolve_track({"mode": mode}, create=True) for mode in ("assistant", "coding", "qa")]
-                    except ValueError as exc:
-                        self._send_json({"ok": False, "error": str(exc)}, status=400)
-                        return
-                    self._send_json({"ok": True, "modes": modes})
-                    return
-                if parsed.path == "/conversation/history":
-                    if not self._authorized() or channel.memory_admin is None:
-                        self._send_json({"ok": False, "error": "Conversation API unavailable"}, status=503)
-                        return
-                    query = parse_qs(parsed.query)
-                    values = {key: items[0] for key, items in query.items() if items}
-                    try:
-                        track = channel.resolve_track(values, create=True)
-                        limit = max(1, min(int(values.get("limit") or "50"), 100))
-                        before = int(values["before_sequence"]) if values.get("before_sequence") else None
-                        records = channel.memory_admin.track_messages(
-                            mode=track["mode"], scope_id=track["scope_id"], track_id=track["track_id"],
-                            limit=limit, before_sequence=before,
-                        )
-                    except (TypeError, ValueError) as exc:
-                        self._send_json({"ok": False, "error": str(exc)}, status=400)
-                        return
-                    self._send_json({"ok": True, "track": track, "messages": records, "has_more": len(records) >= limit})
-                    return
-                if parsed.path == "/llm/providers":
-                    if not self._authorized():
-                        self._send_json({"ok": False, "error": "Unauthorized"}, status=401)
-                        return
-                    if channel.llm_control is None:
-                        self._send_json({"ok": False, "error": "LLM provider control is unavailable"}, status=503)
-                        return
-                    self._send_json({"ok": True, **channel.llm_control.list_providers()})
-                    return
-                if parsed.path == "/memory/messages":
-                    if not self._authorized() or channel.memory_admin is None:
-                        self._send_json({"ok": False, "error": "Memory API unavailable"}, status=503)
-                        return
-                    query = parse_qs(parsed.query)
-                    self._send_json({"ok": True, "messages": channel.memory_admin.factual_messages(query.get("date", [""])[0], int(query.get("limit", ["100"])[0]))})
-                    return
-                if parsed.path == "/memory/daily":
-                    if not self._authorized() or channel.memory_admin is None:
-                        self._send_json({"ok": False, "error": "Memory API unavailable"}, status=503)
-                        return
-                    query = parse_qs(parsed.query)
-                    self._send_json({"ok": True, "daily": channel.memory_admin.daily_memory(query.get("date", [""])[0]), "days": channel.memory_admin.daily_memories()})
-                    return
-                if parsed.path == "/memory/long-term":
-                    if not self._authorized() or channel.memory_admin is None:
-                        self._send_json({"ok": False, "error": "Memory API unavailable"}, status=503)
-                        return
-                    query = parse_qs(parsed.query)
-                    self._send_json({"ok": True, "memories": channel.memory_admin.long_term_memories(query.get("status", [""])[0])})
-                    return
-                if parsed.path == "/memory/export":
-                    if not self._authorized() or channel.memory_admin is None:
-                        self._send_json({"ok": False, "error": "Memory API unavailable"}, status=503)
-                        return
-                    self._send_json({"ok": True, "messages": channel.memory_admin.retention.export()})
-                    return
-                if parsed.path == "/notifications":
-                    if not self._authorized() or channel.memory_admin is None:
-                        self._send_json({"ok": False, "error": "Notification API unavailable"}, status=503)
-                        return
-                    self._send_json({"ok": True, "notifications": channel.memory_admin.notification_status()})
-                    return
-                if parsed.path == "/plans":
-                    if not self._authorized() or channel.memory_admin is None:
-                        self._send_json({"ok": False, "error": "Plan API unavailable"}, status=503)
-                        return
-                    try:
-                        plans = channel.memory_admin.plans()
-                    except RuntimeError as exc:
-                        self._send_json({"ok": False, "error": str(exc)}, status=503)
-                        return
-                    self._send_json({"ok": True, **plans})
-                    return
-                if parsed.path == "/weixin/binding":
-                    if not self._authorized() or channel.memory_admin is None:
-                        self._send_json({"ok": False, "error": "Weixin binding API unavailable"}, status=503)
-                        return
-                    self._send_json({"ok": True, "binding": channel.memory_admin.weixin_binding()})
-                    return
-                if parsed.path == "/stream":
-                    if not self._authorized():
-                        self._send_json({"ok": False, "error": "Unauthorized"}, status=401)
-                        return
-                    request_id = parse_qs(parsed.query).get("request_id", [""])[0]
-                    self._send_sse(request_id)
-                    return
-                self._send_json({"ok": False, "error": "Not found"}, status=404)
-
-            def do_POST(self):
-                parsed = urlparse(self.path)
-                if parsed.path == "/message":
-                    if not self._authorized():
-                        self._send_json({"ok": False, "error": "Unauthorized"}, status=401)
-                        return
-                    try:
-                        result = channel.submit_message(self._read_json())
-                    except ValueError as exc:
-                        self._send_json({"ok": False, "error": str(exc)}, status=400)
-                        return
-                    self._send_json(result, status=200 if result.get("ok") else 503)
-                    return
-                if parsed.path == "/conversation/track":
-                    if not self._authorized():
-                        self._send_json({"ok": False, "error": "Unauthorized"}, status=401)
-                        return
-                    payload = self._read_json()
-                    try:
-                        track = channel.resolve_track(payload, create=True, force_new=str(payload.get("action") or "") == "new")
-                    except ValueError as exc:
-                        self._send_json({"ok": False, "error": str(exc)}, status=400)
-                        return
-                    self._send_json({"ok": True, "track": track})
-                    return
-                if parsed.path == "/permission":
-                    if not self._authorized():
-                        self._send_json({"ok": False, "error": "Unauthorized"}, status=401)
-                        return
-                    payload = self._read_json()
-                    permission_id = str(payload.get("request_id") or payload.get("permission_id") or "")
-                    ok = channel.answer_permission(permission_id, bool(payload.get("allow")))
-                    self._send_json({"ok": ok})
-                    return
-                if parsed.path == "/llm/provider":
-                    if not self._authorized():
-                        self._send_json({"ok": False, "error": "Unauthorized"}, status=401)
-                        return
-                    if channel.llm_control is None:
-                        self._send_json({"ok": False, "error": "LLM provider control is unavailable"}, status=503)
-                        return
-                    payload = self._read_json()
-                    try:
-                        result = channel.llm_control.select_provider(str(payload.get("provider") or ""))
-                    except ValueError as exc:
-                        self._send_json({"ok": False, "error": str(exc)}, status=400)
-                        return
-                    self._send_json({"ok": True, **result})
-                    return
-                if parsed.path == "/memory/redact":
-                    if not self._authorized() or channel.memory_admin is None:
-                        self._send_json({"ok": False, "error": "Memory API unavailable"}, status=503)
-                        return
-                    payload = self._read_json()
-                    try:
-                        result = channel.memory_admin.retention.redact(str(payload.get("message_id") or ""))
-                    except (ValueError, FileNotFoundError) as exc:
-                        self._send_json({"ok": False, "error": str(exc)}, status=400)
-                        return
-                    self._send_json({"ok": True, "result": result})
-                    return
-                if parsed.path == "/memory/long-term/action":
-                    if not self._authorized() or channel.memory_admin is None:
-                        self._send_json({"ok": False, "error": "Memory API unavailable"}, status=503)
-                        return
-                    payload = self._read_json()
-                    manager, memory_id, action = channel.memory_admin.personal_memory, str(payload.get("memory_id") or ""), str(payload.get("action") or "")
-                    try:
-                        if action == "confirm": result = manager.confirm(memory_id)
-                        elif action == "correct": result = manager.supersede(memory_id, str(payload.get("content") or ""))
-                        elif action == "archive": result = manager.archive(memory_id)
-                        elif action == "forget": result = manager.forget(memory_id)
-                        else: raise ValueError("Unsupported memory action")
-                    except (ValueError, FileNotFoundError) as exc:
-                        self._send_json({"ok": False, "error": str(exc)}, status=400)
-                        return
-                    self._send_json({"ok": True, "memory": result.to_dict()})
-                    return
-                if parsed.path == "/plans/action":
-                    if not self._authorized() or channel.memory_admin is None:
-                        self._send_json({"ok": False, "error": "Plan API unavailable"}, status=503)
-                        return
-                    try:
-                        result = channel.memory_admin.plan_action(self._read_json())
-                    except (ValueError, FileNotFoundError, RuntimeError) as exc:
-                        self._send_json({"ok": False, "error": str(exc)}, status=400)
-                        return
-                    self._send_json({"ok": True, **result})
-                    return
-                if parsed.path == "/weixin/binding/code":
-                    if not self._authorized() or channel.memory_admin is None:
-                        self._send_json({"ok": False, "error": "Weixin binding API unavailable"}, status=503)
-                        return
-                    self._send_json({"ok": True, "code": channel.memory_admin.issue_weixin_binding_code(), "expires_in": 600})
-                    return
-                if parsed.path == "/weixin/binding/invalidate":
-                    if not self._authorized() or channel.memory_admin is None:
-                        self._send_json({"ok": False, "error": "Weixin binding API unavailable"}, status=503)
-                        return
-                    self._send_json({"ok": True, "invalidated": channel.memory_admin.invalidate_weixin_binding()})
-                    return
-                self._send_json({"ok": False, "error": "Not found"}, status=404)
-
-            def log_message(self, format, *args):
-                return
-
-            def _read_json(self) -> dict:
-                length = int(self.headers.get("content-length") or "0")
-                if length <= 0:
-                    return {}
-                raw = self.rfile.read(length).decode("utf-8")
-                try:
-                    data = json.loads(raw)
-                except json.JSONDecodeError:
-                    return {}
-                return data if isinstance(data, dict) else {}
-
-            def _authorized(self) -> bool:
-                if not channel.auth_token:
-                    return True
-                header = self.headers.get("authorization") or ""
-                token = self.headers.get("x-aniyaagent-token") or ""
-                if header.lower().startswith("bearer "):
-                    token = header[7:].strip()
-                return token == channel.auth_token
-
-            def _send_json(self, payload: dict, status: int = 200) -> None:
-                body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-                self.send_response(status)
-                self._cors_headers()
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
-            def _send_empty(self, status: int) -> None:
-                self.send_response(status)
-                self._cors_headers()
-                self.send_header("Content-Length", "0")
-                self.end_headers()
-
-            def _send_sse(self, request_id: str) -> None:
-                self.send_response(200)
-                self._cors_headers()
-                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-                self.send_header("Cache-Control", "no-cache")
-                self.send_header("Connection", "keep-alive")
-                self.end_headers()
-                for event in channel.stream(request_id):
-                    event_name = str(event.get("type") or "event")
-                    body = json.dumps(event, ensure_ascii=False)
-                    self.wfile.write(f"event: {event_name}\ndata: {body}\n\n".encode("utf-8"))
-                    self.wfile.flush()
-
-            def _cors_headers(self) -> None:
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.send_header("Access-Control-Allow-Headers", "authorization, content-type, x-aniyaagent-token")
-                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-
-        return Handler
+        event_type = str(event.get("type") or "event")
+        payload = {key: value for key, value in event.items() if key != "type"}
+        self.run_events.publish(request_id, event_type, payload)

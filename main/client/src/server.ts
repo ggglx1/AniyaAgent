@@ -9,7 +9,8 @@ import { WebSocket, WebSocketServer } from 'ws';
 
 type ServerMessage =
   | { type: 'connection.ready'; data: { clientId: string } }
-  | { type: 'agent.status'; data: { status: string } }
+  | { type: 'agent.status'; data: { status: string; requestId?: string } }
+  | { type: 'agent.run'; data: RunSnapshot }
   | { type: 'agent.output'; data: { role: 'assistant' | 'log' | 'error'; content: string } }
   | { type: 'agent.permission'; data: PermissionRequest }
   | { type: 'channels.list'; data: { channels: ChannelInfo[] } }
@@ -20,6 +21,7 @@ type ServerMessage =
 type ClientMessage =
   | { type: 'agent.send'; data?: { content?: string; track?: Partial<TrackDescriptor> } }
   | { type: 'agent.permission'; data?: { requestId?: string; allow?: boolean } }
+  | { type: 'agent.resume'; data?: { requestId?: string; lastEventId?: number; track?: Partial<TrackDescriptor> } }
   | { type: 'channels.list'; data?: Record<string, never> }
   | { type: 'models.list'; data?: Record<string, never> }
   | { type: 'models.select'; data?: { provider?: string } }
@@ -76,6 +78,37 @@ type SseEvent = {
   reason?: string;
   input?: unknown;
   track?: TrackDescriptor;
+  event_id?: number;
+  event_sequence?: number;
+  error_code?: string;
+  metadata?: Record<string, unknown>;
+};
+
+type RunStatus = 'accepted' | 'queued' | 'running' | 'waiting_permission' | 'reconnecting' | 'completed' | 'failed' | 'cancelled' | 'timed_out' | 'unknown';
+
+type RunSnapshot = {
+  requestId: string;
+  status: RunStatus;
+  lastEventId: number;
+  track: Partial<TrackDescriptor>;
+  finalContent?: string;
+  errorCode?: string;
+  errorMessage?: string;
+};
+
+type RunConnection = RunSnapshot & {
+  owner: WebSocket | null;
+  terminal: boolean;
+};
+
+type RunApiState = {
+  request_id: string;
+  status: RunStatus;
+  event_id: number;
+  final_content?: string;
+  error_code?: string;
+  error_message?: string;
+  track_id?: string;
 };
 
 const __filename = fileURLToPath(import.meta.url);
@@ -258,10 +291,12 @@ function handleLogout(req: IncomingMessage, res: ServerResponse): void {
 class WebChannelBridge {
   private process: ChildProcessWithoutNullStreams | null = null;
   private starting: Promise<void> | null = null;
+  private runs = new Map<string, RunConnection>();
+  private consumers = new Map<string, Promise<void>>();
 
   async start(): Promise<void> {
     if (await this.healthy()) {
-      setStatus('ready');
+      if (!this.hasActiveRun()) setStatus('ready');
       return;
     }
     if (this.starting) return this.starting;
@@ -285,8 +320,51 @@ class WebChannelBridge {
     const requestId = String(submit.request_id || '');
     if (!requestId) throw new Error(`WebChannel did not return request_id: ${JSON.stringify(submit)}`);
     const resolvedTrack = (submit.track || track) as TrackDescriptor;
-    await this.readStream(requestId, owner);
-    broadcast({ type: 'conversation.changed', data: { track: resolvedTrack } });
+    const run: RunConnection = {
+      requestId,
+      status: 'accepted',
+      lastEventId: 0,
+      track: resolvedTrack,
+      owner,
+      terminal: false,
+    };
+    this.runs.set(requestId, run);
+    this.notifyRun(run);
+    await this.consumeRun(run);
+  }
+
+  async resume(requestId: string, lastEventId: number, track: Partial<TrackDescriptor>, owner: WebSocket): Promise<void> {
+    if (!requestId) return;
+    await this.start();
+    let run = this.runs.get(requestId);
+    if (!run) {
+      run = {
+        requestId,
+        status: 'reconnecting',
+        lastEventId: Math.max(0, Number(lastEventId) || 0),
+        track,
+        owner,
+        terminal: false,
+      };
+      this.runs.set(requestId, run);
+    } else {
+      run.owner = owner;
+      run.track = Object.keys(track).length ? track : run.track;
+      run.lastEventId = Math.max(run.lastEventId, Math.max(0, Number(lastEventId) || 0));
+    }
+
+    const state = await this.runState(requestId);
+    if (this.isTerminal(state.status)) {
+      this.applyTerminalState(run, state, true);
+      return;
+    }
+    run.status = 'reconnecting';
+    this.notifyRun(run);
+    await this.consumeRun(run);
+  }
+
+  hasActiveRun(): boolean {
+    return [...this.runs.values()].some((run) => !run.terminal);
   }
 
   async listChannels(owner: WebSocket): Promise<void> {
@@ -356,8 +434,9 @@ class WebChannelBridge {
     this.process.stderr.on('data', (chunk) => output('log', chunk.toString('utf8').trimEnd()));
     this.process.on('exit', (code, signal) => {
       this.process = null;
-      setStatus('offline');
-      output('error', `WebChannel exited with code ${code ?? 'null'}${signal ? ` signal ${signal}` : ''}`);
+      latestStatus = 'reconnecting';
+      sendToOwner({ type: 'agent.status', data: { status: 'reconnecting' } });
+      output('log', `WebChannel exited with code ${code ?? 'null'}${signal ? ` signal ${signal}` : ''}; recovering.`);
     });
     this.process.on('error', (error) => {
       this.process = null;
@@ -368,7 +447,7 @@ class WebChannelBridge {
     const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
       if (await this.healthy()) {
-        setStatus('ready');
+        if (!this.hasActiveRun()) setStatus('ready');
         return;
       }
       await sleep(500);
@@ -398,78 +477,194 @@ class WebChannelBridge {
     return payload;
   }
 
-  private async readStream(requestId: string, owner: WebSocket): Promise<void> {
-    const response = await fetch(`${webChannelUrl}/stream?${new URLSearchParams({ request_id: requestId })}`, { headers: this.headers() });
+  private async consumeRun(run: RunConnection): Promise<void> {
+    const existing = this.consumers.get(run.requestId);
+    if (existing) return existing;
+    const consumer = this.consumeRunLoop(run).finally(() => this.consumers.delete(run.requestId));
+    this.consumers.set(run.requestId, consumer);
+    return consumer;
+  }
+
+  private async consumeRunLoop(run: RunConnection): Promise<void> {
+    let retry = 0;
+    while (!run.terminal) {
+      try {
+        await this.start();
+        const terminalSeen = await this.readStreamOnce(run);
+        if (terminalSeen || run.terminal) return;
+      } catch {
+        // A transport failure is not an Agent failure. Query the durable run state below.
+      }
+
+      try {
+        const state = await this.runState(run.requestId);
+        if (this.isTerminal(state.status)) {
+          this.applyTerminalState(run, state);
+          return;
+        }
+      } catch {
+        // The runtime may itself be restarting. Keep the run recoverable and retry.
+      }
+
+      run.status = 'reconnecting';
+      latestStatus = 'reconnecting';
+      this.notifyRun(run);
+      if (run.owner) sendJson(run.owner, { type: 'agent.status', data: { status: 'reconnecting', requestId: run.requestId } });
+      await sleep(Math.min(10_000, 500 * (2 ** Math.min(retry, 5))));
+      retry += 1;
+    }
+  }
+
+  private async readStreamOnce(run: RunConnection): Promise<boolean> {
+    const query = new URLSearchParams({
+      request_id: run.requestId,
+      after_sequence: String(run.lastEventId),
+    });
+    const response = await fetch(`${webChannelUrl}/stream?${query}`, {
+      headers: this.headers({ 'last-event-id': String(run.lastEventId) }),
+      signal: AbortSignal.timeout(90_000),
+    });
     if (!response.ok || !response.body) throw new Error(`GET /stream failed: ${response.status}`);
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-
     while (true) {
       const { value, done } = await reader.read();
-      if (done) break;
+      if (done) return false;
       buffer += decoder.decode(value, { stream: true });
-
       while (true) {
         const splitAt = buffer.indexOf('\n\n');
         if (splitAt < 0) break;
         const rawEvent = buffer.slice(0, splitAt);
         buffer = buffer.slice(splitAt + 2);
-        const parsed = parseSse(rawEvent);
-        if (parsed && this.handleSseEvent(parsed, owner)) return;
+        const event = parseSse(rawEvent);
+        if (!event) continue;
+        const eventId = Number(event.event_id || event.event_sequence || 0);
+        if (eventId > run.lastEventId) run.lastEventId = eventId;
+        if (this.handleSseEvent(event, run)) return true;
+        this.notifyRun(run);
       }
     }
   }
 
-  private handleSseEvent(event: SseEvent, owner: WebSocket): boolean {
+  private handleSseEvent(event: SseEvent, run: RunConnection): boolean {
+    const owner = run.owner;
     switch (event.type) {
       case 'accepted':
-        sendJson(owner, { type: 'agent.status', data: { status: 'busy' } });
+      case 'queued':
+      case 'running':
+      case 'resumed':
+        run.status = event.type === 'queued' ? 'queued' : event.type === 'accepted' ? 'accepted' : 'running';
+        latestStatus = 'busy';
+        if (owner) sendJson(owner, { type: 'agent.status', data: { status: 'busy', requestId: run.requestId } });
         return false;
       case 'llm_start':
-        sendJson(owner, { type: 'agent.output', data: { role: 'log', content: 'LLM request started' } });
+        if (owner) sendJson(owner, { type: 'agent.output', data: { role: 'log', content: 'LLM request started' } });
         return false;
       case 'llm_end':
-        sendJson(owner, { type: 'agent.output', data: { role: 'log', content: 'LLM request completed' } });
+        if (owner) sendJson(owner, { type: 'agent.output', data: { role: 'log', content: 'LLM request completed' } });
         return false;
       case 'llm_error':
-        sendJson(owner, { type: 'agent.output', data: { role: 'error', content: stringifyEventData(event) } });
+        if (owner) sendJson(owner, { type: 'agent.output', data: { role: 'log', content: stringifyEventData(event) } });
         return false;
       case 'tool_start':
-        sendJson(owner, { type: 'agent.output', data: { role: 'log', content: `Tool started: ${toolName(event)}` } });
+        if (owner) sendJson(owner, { type: 'agent.output', data: { role: 'log', content: `Tool started: ${toolName(event)}` } });
         return false;
       case 'tool_end':
-        sendJson(owner, { type: 'agent.output', data: { role: 'log', content: `Tool completed: ${toolName(event)}` } });
+        if (owner) sendJson(owner, { type: 'agent.output', data: { role: 'log', content: `Tool completed: ${toolName(event)}` } });
         return false;
       case 'tool_blocked':
-        sendJson(owner, { type: 'agent.output', data: { role: 'error', content: `Tool blocked: ${toolName(event)}` } });
+        if (owner) sendJson(owner, { type: 'agent.output', data: { role: 'error', content: `Tool blocked: ${toolName(event)}` } });
         return false;
       case 'permission_request':
-        sendJson(owner, {
-          type: 'agent.permission',
-          data: {
-            requestId: String(event.request_id || ''),
-            tool: String(event.tool || ''),
-            reason: String(event.reason || ''),
-            input: event.input,
-          },
-        });
+        run.status = 'waiting_permission';
+        if (owner) {
+          sendJson(owner, {
+            type: 'agent.permission',
+            data: {
+              requestId: String(event.request_id || ''),
+              tool: String(event.tool || ''),
+              reason: String(event.reason || ''),
+              input: event.input,
+            },
+          });
+        }
         return false;
-      case 'done':
-        if (event.error) sendJson(owner, { type: 'agent.output', data: { role: 'error', content: String(event.error) } });
-        if (event.content) sendJson(owner, { type: 'agent.output', data: { role: 'assistant', content: String(event.content) } });
-        latestStatus = event.status === 'completed' ? 'ready' : String(event.status || 'ready');
-        sendJson(owner, { type: 'agent.status', data: { status: latestStatus } });
-        return true;
-      case 'error':
-        sendJson(owner, { type: 'agent.output', data: { role: 'error', content: String(event.error || 'WebChannel stream error') } });
-        latestStatus = 'error';
-        sendJson(owner, { type: 'agent.status', data: { status: 'error' } });
+      case 'completed':
+      case 'failed':
+      case 'cancelled':
+      case 'timed_out':
+        this.applyTerminalEvent(run, event);
         return true;
       default:
         return false;
     }
+  }
+
+  private async runState(requestId: string): Promise<RunApiState> {
+    const response = await fetch(`${webChannelUrl}/runs/${encodeURIComponent(requestId)}`, { headers: this.headers() });
+    const payload = await response.json() as { ok?: boolean; run?: RunApiState; error?: string };
+    if (!response.ok || !payload.run) throw new Error(String(payload.error || `Run state unavailable: ${response.status}`));
+    return payload.run;
+  }
+
+  private applyTerminalEvent(run: RunConnection, event: SseEvent): void {
+    this.finishRun(run, String(event.type) as RunStatus, {
+      finalContent: String(event.content || ''),
+      errorCode: String(event.error_code || ''),
+      errorMessage: String(event.error || ''),
+    });
+  }
+
+  private applyTerminalState(run: RunConnection, state: RunApiState, replay = false): void {
+    run.lastEventId = Math.max(run.lastEventId, Number(state.event_id || 0));
+    this.finishRun(run, state.status, {
+      finalContent: String(state.final_content || ''),
+      errorCode: String(state.error_code || ''),
+      errorMessage: String(state.error_message || ''),
+    }, replay);
+  }
+
+  private finishRun(run: RunConnection, status: RunStatus, result: { finalContent?: string; errorCode?: string; errorMessage?: string }, replay = false): void {
+    if (run.terminal && !replay) return;
+    run.status = status;
+    run.terminal = true;
+    run.finalContent = result.finalContent || '';
+    run.errorCode = result.errorCode || '';
+    run.errorMessage = result.errorMessage || '';
+    latestStatus = status === 'completed' ? 'ready' : status;
+    const owner = run.owner;
+    if (owner && status === 'completed' && run.finalContent) {
+      sendJson(owner, { type: 'agent.output', data: { role: 'assistant', content: run.finalContent } });
+    }
+    if (owner && status !== 'completed' && run.errorMessage) {
+      sendJson(owner, { type: 'agent.output', data: { role: 'error', content: run.errorMessage } });
+    }
+    if (owner) sendJson(owner, { type: 'agent.status', data: { status: latestStatus, requestId: run.requestId } });
+    this.notifyRun(run);
+    const track = run.track as TrackDescriptor;
+    if (track?.track_id) broadcast({ type: 'conversation.changed', data: { track } });
+  }
+
+  private notifyRun(run: RunConnection): void {
+    if (!run.owner) return;
+    sendJson(run.owner, {
+      type: 'agent.run',
+      data: {
+        requestId: run.requestId,
+        status: run.status,
+        lastEventId: run.lastEventId,
+        track: run.track,
+        finalContent: run.finalContent,
+        errorCode: run.errorCode,
+        errorMessage: run.errorMessage,
+      },
+    });
+  }
+
+  private isTerminal(status: string): status is RunStatus {
+    return ['completed', 'failed', 'cancelled', 'timed_out'].includes(status);
   }
 
   private headers(extra: Record<string, string> = {}): Record<string, string> {
@@ -500,15 +695,19 @@ function readRequestBody(req: IncomingMessage): Promise<Buffer> {
 }
 
 function parseSse(rawEvent: string): SseEvent | null {
-  const dataLines = rawEvent
-    .split(/\r?\n/)
-    .filter((line) => line.startsWith('data:'))
-    .map((line) => line.slice(5).trimStart());
+  const lines = rawEvent.split(/\r?\n/);
+  const dataLines = lines.filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trimStart());
   if (!dataLines.length) return null;
+  const idLine = lines.find((line) => line.startsWith('id:'));
+  const eventLine = lines.find((line) => line.startsWith('event:'));
+  const eventId = Number(idLine?.slice(3).trim() || 0);
   try {
-    return JSON.parse(dataLines.join('\n')) as SseEvent;
+    const parsed = JSON.parse(dataLines.join('\n')) as SseEvent;
+    if (!parsed.type && eventLine) parsed.type = eventLine.slice(6).trim();
+    if (eventId > 0) parsed.event_id = eventId;
+    return parsed;
   } catch {
-    return { type: 'event', content: dataLines.join('\n') };
+    return { type: eventLine?.slice(6).trim() || 'event', content: dataLines.join('\n'), event_id: eventId || undefined };
   }
 }
 
@@ -556,7 +755,8 @@ const server = createServer((req, res) => {
       '/plans', '/plans/action', '/weixin/binding', '/weixin/binding/code', '/weixin/binding/invalidate',
     ]);
     const targetPath = url.pathname.slice(4);
-    if (!allowed.has(targetPath)) {
+    const runPathAllowed = /^\/runs\/(?:active|[A-Za-z0-9_-]+)$/.test(targetPath);
+    if (!allowed.has(targetPath) && !runPathAllowed) {
       res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({ ok: false, error: 'Not found' }));
       return;
@@ -594,6 +794,22 @@ wss.on('connection', (ws) => {
         });
         return;
       }
+      if (message.type === 'agent.resume') {
+        const requestId = String(message.data?.requestId || '');
+        sendJson(ws, {
+          type: 'agent.run',
+          data: {
+            requestId,
+            status: 'unknown',
+            lastEventId: Number(message.data?.lastEventId || 0),
+            track: message.data?.track || {},
+            errorCode: 'run_state_unavailable',
+            errorMessage: '运行状态暂时无法确认。',
+          },
+        });
+        sendJson(ws, { type: 'agent.status', data: { status: 'ready' } });
+        return;
+      }
       latestStatus = 'error';
       sendJson(ws, { type: 'agent.status', data: { status: 'error' } });
       sendJson(ws, { type: 'agent.output', data: { role: 'error', content: error instanceof Error ? error.message : String(error) } });
@@ -613,11 +829,25 @@ async function handleClientMessage(message: ClientMessage, owner: WebSocket): Pr
   if (message.type === 'agent.send') {
     const content = String(message.data?.content || '').trim();
     if (content) {
-      if (activeOwner && activeOwner !== owner && latestStatus === 'busy') {
+      if (activeOwner && activeOwner !== owner && bridge.hasActiveRun()) {
         throw new Error('Another authenticated device is currently running a request.');
       }
       activeOwner = owner;
       await bridge.send(content, message.data?.track || { mode: 'assistant' }, owner);
+    }
+    return;
+  }
+
+  if (message.type === 'agent.resume') {
+    const requestId = String(message.data?.requestId || '').trim();
+    if (requestId) {
+      activeOwner = owner;
+      await bridge.resume(
+        requestId,
+        Number(message.data?.lastEventId || 0),
+        message.data?.track || {},
+        owner,
+      );
     }
     return;
   }

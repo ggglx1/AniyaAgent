@@ -55,3 +55,11 @@ class SchedulerService:
             except Exception:
                 # Leave it unreconciled for a later scheduler pass rather than guessing.
                 continue
+
+    def health(self) -> dict:
+        now = datetime.now(timezone.utc).isoformat().replace('+00:00','Z')
+        with self.repository.connect() as connection:
+            lease = connection.execute("SELECT * FROM scheduler_lease WHERE lease_name='primary'").fetchone()
+            pending = connection.execute("SELECT COUNT(*) FROM maintenance_requests WHERE state IN ('pending','claimed')").fetchone()[0]
+        outbox = self.runtime.reminder_dispatcher.delivery_outbox
+        return {"online": bool(lease and lease['expires_at'] > now), "worker_id": lease['worker_id'] if lease else "", "heartbeat": lease['updated_at'] if lease else "", "pending_jobs": pending, "unknown_deliveries": len(outbox.unknown_deliveries())}

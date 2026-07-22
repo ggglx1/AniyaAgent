@@ -35,6 +35,11 @@ class ConversationStore:
         if not path.exists(): return []
         with self.lock: return json.loads(path.read_text(encoding="utf-8"))
 
+    def load_working(self, session_id: str) -> list:
+        path = self.working_path(session_id)
+        if not path.exists(): return []
+        with self.lock: return json.loads(path.read_text(encoding="utf-8"))
+
     def quarantine(self, session_id: str, run_id: str, messages: list, reason: str, diagnostics: list[str] | None = None) -> Path:
         path = self.store_dir / self.safe_id(session_id) / "quarantine" / f"{run_id}_{int(time.time())}.json"
         payload = {"reason": reason, "diagnostics": diagnostics or [], "messages": messages}

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from main.agent import main_loop
 from main.conversation import ConversationMemoryRepository
+from main.attachments import AttachmentService
+from main.mcp import McpGateway
 from .coding_assistant import CodingAssistantService
 from .lifecycle import Lifecycle
 from .personal_assistant import PersonalAssistantService
@@ -18,6 +20,8 @@ class AniyaApplication:
         self.runtime = main_loop
         self.lifecycle = Lifecycle()
         self.repository = ConversationMemoryRepository(main_loop.WORKDIR)
+        self.attachments = AttachmentService(main_loop.WORKDIR)
+        self.mcp = McpGateway(main_loop.WORKDIR)
         self.assistant = PersonalAssistantService(main_loop.get_channel_runtime(), main_loop.conversation_memory)
         self.coding = CodingAssistantService(main_loop.WORKDIR, self.repository, main_loop.get_channel_runtime)
         self.qa = QaService(main_loop.llm_gateway, main_loop.MODEL, self.repository)

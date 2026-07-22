@@ -10,7 +10,14 @@ class MemoryResolver:
     def resolve(self, candidate: dict, user_id: str = "local") -> tuple[str, object | None]:
         normalized = candidate["content"].casefold().strip()
         active = self.manager.list(user_id=user_id, status="active", limit=200)
+        scope = str(candidate.get("scope") or "assistant_only")
+        repository_id = str(candidate.get("repository_id") or "")
         for record in active:
+            metadata = record.metadata or {}
+            if str(metadata.get("scope") or "assistant_only") != scope:
+                continue
+            if str(metadata.get("repository_id") or "") != repository_id:
+                continue
             if record.content.casefold().strip() == normalized:
                 return "duplicate", record
             if record.type == candidate["memory_type"] and self.same_subject(record.content, candidate["content"]):

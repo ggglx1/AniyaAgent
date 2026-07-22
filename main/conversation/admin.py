@@ -44,11 +44,18 @@ class MemoryAdminService:
             for item in records
         ]
 
+    def search_messages(self, query: str, mode: str = "assistant", limit: int = 50) -> list[dict]:
+        return [{**item.to_dict(), "attachments": self.conversation.repository.attachments(item.message_id)} for item in self.conversation.repository.search_track_messages(query, mode=mode, limit=limit)]
+
     def daily_memory(self, local_date: str = "") -> dict | None:
         return self.conversation.repository.day(local_date) if local_date else self.conversation.repository.latest_daily_memory()
 
     def daily_memories(self, limit: int = 100) -> list[dict]:
         return self.conversation.repository.list_days(limit)
+
+    def rebuild_daily_memory(self, local_date: str) -> dict:
+        self.conversation.repository.mark_daily_needs_rebuild(local_date)
+        return {"date": local_date, "summary": self.conversation.generate_daily_memory(local_date), "status": "generated"}
 
     def long_term_memories(self, status: str = "", limit: int = 100) -> list[dict]:
         return [
