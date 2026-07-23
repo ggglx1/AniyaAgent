@@ -10,6 +10,7 @@ from .base import AgentResponse, ChannelMessage, ChannelSendResult
 from .runtime import ChannelRuntime
 from .types import ChannelKind, TrustLevel
 from main.application.run_events import RunEventStore
+from main.runtime.models import RunRequest
 
 
 class WebChannel:
@@ -135,16 +136,12 @@ class WebChannel:
         self._local.request_id = request_id
         self.run_events.publish(request_id, "running", {"track": track})
         try:
-            if track["mode"] == "qa":
-                text = self.application.qa.ask(message.text, track["topic_id"]); response = AgentResponse(self.channel_id, message.conversation_id, request_id, "completed", text)
-            elif track["mode"] == "coding":
-                result = self.application.coding.handle(message.text, track["repository_root"], track["work_session_id"]); response = AgentResponse(self.channel_id, message.conversation_id, request_id, "completed", result["text"], metadata=result)
-            else:
-                response = self.channel_runtime.handle_message(message, deliver=False, event_callback=lambda kind, payload: self._on_runtime_event(request_id, kind, payload))
+            request = RunRequest(request_id, message.user_id, message.channel_id, message.conversation_id, track["mode"], track["track_id"], message.text, {**message.metadata, "repository_root":track.get("repository_root", "")})
+            result = self.application.run_coordinator.execute(request, emit=lambda kind, payload: self._on_runtime_event(request_id, kind, payload))
             if self.run_events.is_cancelled(request_id):
-                self.run_events.finish(request_id, "cancelled", error_code="user_requested", error_message="Run cancelled", payload={"track": track, "runtime_run_id": response.run_id})
+                self.run_events.finish(request_id, "cancelled", error_code="user_requested", error_message="Run cancelled", payload={"track": track})
             else:
-                status = str(response.status or "failed").lower()
+                status = str(result.status or "failed").lower()
                 if status == "completed":
                     terminal = "completed"
                 elif status in {"cancelled", "timed_out"}:
@@ -154,11 +151,11 @@ class WebChannel:
                 self.run_events.finish(
                     request_id,
                     terminal,
-                    content=response.text if terminal == "completed" else "",
+                    content=result.output if terminal == "completed" else "",
                     error_code="" if terminal == "completed" else status,
-                    error_message=response.error if terminal != "completed" else "",
-                    metadata=response.metadata,
-                    payload={"track": track, "runtime_run_id": response.run_id},
+                    error_message=result.error if terminal != "completed" else "",
+                    metadata=result.metadata,
+                    payload={"track": track},
                 )
         except Exception as exc:
             self.run_events.finish(request_id, "failed", error_code=type(exc).__name__, error_message=f"{type(exc).__name__}: {exc}", payload={"track": track})
