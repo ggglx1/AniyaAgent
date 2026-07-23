@@ -25,7 +25,7 @@ class ProviderManager:
         if self.active_name not in self.providers:
             self.active_name = "anthropic"
 
-    def create_message(self, *, model=None, system, messages, tools, max_tokens=8000):
+    def create_message(self, *, model=None, system, messages, tools, max_tokens=8000, timeout=120):
         with self.lock:
             active_name = self.active_name
         settings = ensure_configured(active_name)
@@ -38,6 +38,7 @@ class ProviderManager:
             messages=messages,
             tools=tools,
             max_tokens=max_tokens,
+            timeout=timeout,
         )
 
     def resolve_model(self, requested_model: str | None, active_default: str) -> str:

@@ -5,6 +5,12 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 from main.agent import runtime_context as RuntimeContext
+from main.llm.usage import (
+    current_request_context,
+    estimate_tokens,
+    normalize_usage,
+    request_timing,
+)
 
 
 @dataclass
@@ -15,7 +21,8 @@ class LlmRequest:
     event: threading.Event = field(default_factory=threading.Event)
     response: Any = None
     error: BaseException | None = None
-    queued_at: float = field(default_factory=time.time)
+    queued_at: float = field(default_factory=time.perf_counter)
+    context: dict = field(default_factory=dict)
 
 
 class QueuedMessagesClient:
@@ -40,6 +47,7 @@ class LlmGateway:
         self.primary_model = primary_model
         self.max_concurrent = max_concurrent or int(os.getenv("LLM_MAX_CONCURRENT", "1"))
         self.logger = logger or (lambda _: None)
+        self.usage_recorder: Callable[[dict], None] | None = None
         self.messages = QueuedMessagesClient(self)
         self.queues: dict[str, queue.PriorityQueue[tuple[int, int, LlmRequest | None]]] = {
             "main": queue.PriorityQueue(),
@@ -59,7 +67,12 @@ class LlmGateway:
         if remaining is not None:
             kwargs["timeout"] = min(float(kwargs.get("timeout", 120)), remaining)
         sequence = self.next_sequence()
-        request = LlmRequest(task_type=task_type, kwargs=kwargs, sequence=sequence)
+        request = LlmRequest(
+            task_type=task_type,
+            kwargs=kwargs,
+            sequence=sequence,
+            context=current_request_context(),
+        )
         lane = self.lane_for_task(task_type)
         self.queues[lane].put((self.priority_for_task(task_type), sequence, request))
         if not request.event.wait(timeout=remaining):
@@ -73,6 +86,9 @@ class LlmGateway:
         with self.sequence_lock:
             self.sequence += 1
             return self.sequence
+
+    def set_usage_recorder(self, recorder: Callable[[dict], None] | None) -> None:
+        self.usage_recorder = recorder
 
     def start_lane_workers(self, lane: str, count: int) -> None:
         for index in range(max(1, count)):
@@ -93,13 +109,16 @@ class LlmGateway:
                 requests.task_done()
                 return
 
+            started_at = time.perf_counter()
+            resolved_model = ""
             try:
                 kwargs = dict(request.kwargs)
                 remaining = RuntimeContext.remaining_seconds()
                 if remaining is not None:
                     kwargs["timeout"] = min(float(kwargs.get("timeout", 120)), remaining)
                 kwargs["model"] = self.resolve_model(request.task_type, kwargs.get("model"))
-                waited = time.time() - request.queued_at
+                resolved_model = str(kwargs["model"])
+                waited = time.perf_counter() - request.queued_at
                 if waited > 0.25:
                     self.logger(
                         f"[llm queue:{lane}] {request.task_type} waited {waited:.2f}s "
@@ -109,8 +128,41 @@ class LlmGateway:
             except BaseException as exc:
                 request.error = exc
             finally:
+                self.record_usage(request, lane, started_at, resolved_model)
                 request.event.set()
                 requests.task_done()
+
+    def record_usage(
+        self,
+        request: LlmRequest,
+        lane: str,
+        started_at: float,
+        resolved_model: str,
+    ) -> None:
+        if self.usage_recorder is None:
+            return
+        kwargs = request.kwargs
+        provider = self.active_provider_name()
+        raw = getattr(request.response, "raw", {}) if request.response is not None else {}
+        record = {
+            **request.context,
+            "sequence": request.sequence,
+            "task_type": request.task_type,
+            "lane": lane,
+            "provider": provider,
+            "model": resolved_model or str(kwargs.get("model") or self.primary_model),
+            "max_tokens": int(kwargs.get("max_tokens", 0) or 0),
+            "system_tokens_estimated": estimate_tokens(kwargs.get("system", "")),
+            "history_tokens_estimated": estimate_tokens(kwargs.get("messages", [])),
+            "tool_schema_tokens_estimated": estimate_tokens(kwargs.get("tools", [])),
+            "request_error": "" if request.error is None else f"{type(request.error).__name__}: {request.error}",
+            **request_timing(started_at, request.queued_at),
+            **normalize_usage(raw, provider),
+        }
+        try:
+            self.usage_recorder(record)
+        except Exception as exc:
+            self.logger(f"[llm usage recorder] {type(exc).__name__}: {exc}")
 
     def resolve_model(self, task_type: str, requested_model: str | None) -> str:
         routed_model = self.model_for_task(task_type)

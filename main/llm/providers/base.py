@@ -38,6 +38,7 @@ class LlmProvider(ABC):
         messages: list,
         tools: list,
         max_tokens: int,
+        timeout: float,
     ) -> MessageResponse:
         pass
 

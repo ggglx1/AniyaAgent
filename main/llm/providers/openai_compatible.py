@@ -10,8 +10,9 @@ class OpenAICompatibleProvider(LlmProvider):
     name = "openai"
 
     def create_message(self, config: ProviderConfig, **kwargs) -> MessageResponse:
+        timeout = kwargs.pop("timeout", 120)
         url, payload, headers = self.build_request(config, **kwargs)
-        return self.parse_response(post_json(url, payload, headers))
+        return self.parse_response(post_json(url, payload, headers, timeout=timeout))
 
     def build_request(self, config: ProviderConfig, **kwargs) -> tuple[str, dict, dict]:
         payload = {

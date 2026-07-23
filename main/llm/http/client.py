@@ -5,13 +5,14 @@ class MessagesClient:
     def __init__(self, provider_manager: ProviderManager):
         self.provider_manager = provider_manager
 
-    def create(self, *, model=None, system, messages, tools, max_tokens=8000):
+    def create(self, *, model=None, system, messages, tools=None, max_tokens=8000, timeout=120):
         return self.provider_manager.create_message(
             model=model,
             system=system,
             messages=messages,
-            tools=tools,
+            tools=tools or [],
             max_tokens=max_tokens,
+            timeout=timeout,
         )
 
 
