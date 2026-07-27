@@ -71,6 +71,7 @@ class OpenAICompatibleProvider(LlmProvider):
                 converted.append(item)
                 continue
             text_parts = []
+            image_parts = []
             for block in blocks:
                 block_type = self.value(block, "type")
                 if block_type == "tool_result":
@@ -81,7 +82,15 @@ class OpenAICompatibleProvider(LlmProvider):
                     })
                 elif block_type == "text":
                     text_parts.append(str(self.value(block, "text") or ""))
-            if text_parts:
+                elif block_type == "image":
+                    source = self.value(block, "source") or {}
+                    media_type = self.value(source, "media_type") or "image/png"
+                    data = self.value(source, "data") or ""
+                    if data:
+                        image_parts.append({"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{data}"}})
+            if image_parts:
+                converted.append({"role": role or "user", "content": [{"type": "text", "text": "\n".join(text_parts)} if text_parts else {"type": "text", "text": "Please inspect the attached image."}, *image_parts]})
+            elif text_parts:
                 converted.append({"role": role or "user", "content": "\n".join(text_parts)})
         return converted
 

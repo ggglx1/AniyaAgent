@@ -23,6 +23,7 @@ class LlmRequest:
     error: BaseException | None = None
     queued_at: float = field(default_factory=time.perf_counter)
     context: dict = field(default_factory=dict)
+    cancellation_token: object | None = None
 
 
 class QueuedMessagesClient:
@@ -72,11 +73,17 @@ class LlmGateway:
             kwargs=kwargs,
             sequence=sequence,
             context=current_request_context(),
+            cancellation_token=getattr(RuntimeContext.current_state(), "cancellation_token", None),
         )
         lane = self.lane_for_task(task_type)
         self.queues[lane].put((self.priority_for_task(task_type), sequence, request))
-        if not request.event.wait(timeout=remaining):
-            raise TimeoutError("LLM request exceeded the remaining run deadline")
+        # A queue wait must be interruptible: cancelled work must not occupy a worker later.
+        started = time.monotonic()
+        while not request.event.wait(timeout=0.1):
+            if request.cancellation_token is not None:
+                request.cancellation_token.check()
+            if remaining is not None and time.monotonic() - started >= remaining:
+                raise TimeoutError("LLM request exceeded the remaining run deadline")
 
         if request.error is not None:
             raise request.error
@@ -113,7 +120,9 @@ class LlmGateway:
             resolved_model = ""
             try:
                 kwargs = dict(request.kwargs)
-                remaining = RuntimeContext.remaining_seconds()
+                if request.cancellation_token is not None:
+                    request.cancellation_token.check()
+                remaining = request.cancellation_token.remaining_seconds() if request.cancellation_token is not None else RuntimeContext.remaining_seconds()
                 if remaining is not None:
                     kwargs["timeout"] = min(float(kwargs.get("timeout", 120)), remaining)
                 kwargs["model"] = self.resolve_model(request.task_type, kwargs.get("model"))
@@ -125,6 +134,8 @@ class LlmGateway:
                         f"(pending={requests.qsize()})"
                     )
                 request.response = self.base_client.messages.create(**kwargs)
+                if request.cancellation_token is not None:
+                    request.cancellation_token.check()
             except BaseException as exc:
                 request.error = exc
             finally:

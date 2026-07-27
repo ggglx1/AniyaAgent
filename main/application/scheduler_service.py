@@ -11,8 +11,8 @@ from main.conversation import ConversationRetentionService
 class SchedulerService:
     """The only owner of recurring work. SQLite leases prevent duplicate schedulers."""
 
-    def __init__(self, runtime_module, repository):
-        self.runtime = runtime_module; self.repository = repository; self.worker_id = f"scheduler-{os.getpid()}-{uuid.uuid4().hex[:8]}"; self._stop = threading.Event(); self._thread = None
+    def __init__(self, runtime_module, repository, application=None):
+        self.runtime = runtime_module; self.repository = repository; self.application = application; self.worker_id = f"scheduler-{os.getpid()}-{uuid.uuid4().hex[:8]}"; self._stop = threading.Event(); self._thread = None
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive(): return
@@ -33,8 +33,25 @@ class SchedulerService:
         for item in self.repository.claim_maintenance(self.worker_id):
             try:
                 kind = item['kind']
-                if kind in {'memory_maintenance', 'daily_memory', 'project_summary'}: self.runtime.memory_maintenance.tick()
+                if kind == 'memory_pipeline':
+                    payload = item.get('payload') or {}
+                    if not payload:
+                        import json
+                        payload = json.loads(item.get('payload_json') or '{}')
+                    self.runtime.memory_pipeline.process(payload.get('message_ids') or [], user_id='local', mode=payload.get('mode', 'assistant'), repository_id=payload.get('repository_id', ''))
+                elif kind == 'proactive_event':
+                    if self.application is None:
+                        raise RuntimeError('proactive executor is unavailable')
+                    import json
+                    from main.runtime.models import RunRequest
+                    payload = json.loads(item.get('payload_json') or '{}')
+                    event = dict(payload.get('event') or payload)
+                    run_id = str(event.get('run_id') or f"proactive_{uuid.uuid4().hex[:16]}")
+                    self.application.run_coordinator.execute(RunRequest(run_id, 'local', 'scheduler', 'personal', 'assistant', 'assistant:personal', str(event.get('content') or ''), {'proactive_event': event}))
+                elif kind in {'memory_maintenance', 'daily_memory', 'project_summary'}: self.runtime.memory_maintenance.tick()
                 elif kind == 'retention_cleanup': ConversationRetentionService(self.runtime.conversation_memory.repository, self.runtime.personal_memory_manager).cleanup_expired_operational_artifacts()
+                else:
+                    raise ValueError(f'unsupported_kind:{kind}')
                 self.repository.complete_maintenance(item['id'], item['claim_token']); handled += 1
             except Exception as exc:
                 self.repository.complete_maintenance(item['id'], item['claim_token'], f'{type(exc).__name__}: {exc}')

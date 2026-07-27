@@ -42,7 +42,11 @@ class ProcessingLedger:
         with self.connect() as connection:
             try:
                 connection.execute("INSERT INTO processed_sources(source_message_id,extractor_version,candidate_kind,state,processed_at) VALUES (?, ?, ?, 'processing', ?)", (source_message_id,version,candidate_kind,now)); return True
-            except sqlite3.IntegrityError: return False
+            except sqlite3.IntegrityError:
+                return bool(connection.execute(
+                    "UPDATE processed_sources SET state='processing', error='', processed_at=? WHERE source_message_id=? AND extractor_version=? AND candidate_kind=? AND state='retryable_failed'",
+                    (now, source_message_id, version, candidate_kind),
+                ).rowcount)
 
     def fail(self, source_message_id: str, version: str, error: str, permanent: bool = False) -> None:
         with self.connect() as connection:

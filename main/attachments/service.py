@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import mimetypes
@@ -66,6 +67,19 @@ class AttachmentService:
             chunks.append(f"<attachment id=\"{attachment_id}\" name=\"{item['original_name']}\">\n{text}\n</attachment>"); remaining -= len(text)
             if remaining <= 0: break
         return "\n\n".join(chunks), images
+
+    def model_image_blocks(self, attachment_ids: list[str], owner_id: str = "local", limit: int = 4) -> list[dict]:
+        """Read local images through the attachment boundary; providers never receive paths."""
+        blocks = []
+        for attachment_id in attachment_ids[:limit]:
+            item = self.get(attachment_id, owner_id)
+            if not item["media_type"].startswith("image/"):
+                continue
+            if item["size_bytes"] > 8 * 1024 * 1024:
+                raise ValueError(f"Image attachment {attachment_id} exceeds the 8 MiB model limit")
+            raw = Path(item["storage_path"]).read_bytes()
+            blocks.append({"type": "image", "source": {"type": "base64", "media_type": item["media_type"], "data": base64.b64encode(raw).decode("ascii")}, "attachment_id": attachment_id})
+        return blocks
 
     def extract(self, media_type: str, data: bytes) -> str:
         if media_type.startswith("image/"): return ""

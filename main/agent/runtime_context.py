@@ -16,6 +16,7 @@ class RuntimeContextState:
     event_callback: Callable[[str, dict], None] | None = None
     turn_index: int = 0
     deadline: RunDeadline | None = None
+    cancellation_token: object | None = None
 
 
 def bind_runtime(
@@ -25,6 +26,7 @@ def bind_runtime(
     conversations,
     event_callback: Callable[[str, dict], None] | None = None,
     deadline: RunDeadline | None = None,
+    cancellation_token=None,
 ) -> None:
     _local.state = RuntimeContextState(
         run_id=run_id,
@@ -33,6 +35,7 @@ def bind_runtime(
         conversations=conversations,
         event_callback=event_callback,
         deadline=deadline,
+        cancellation_token=cancellation_token,
     )
 
 
@@ -46,6 +49,8 @@ def current_state() -> RuntimeContextState | None:
 
 def remaining_seconds(component_timeout: float | None = None) -> float | None:
     state = current_state()
+    if state and state.cancellation_token is not None:
+        state.cancellation_token.check()
     return state.deadline.require_remaining(component_timeout) if state and state.deadline else None
 
 

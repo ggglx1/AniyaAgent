@@ -32,7 +32,6 @@ class WebChannel:
         request_id = uuid.uuid4().hex
         with self._lock:
             self.request_sessions[request_id] = conversation_id; self.conversation_requests[conversation_id] = request_id
-        self.run_events.create(request_id, conversation_id, track["track_id"])
         metadata = {**dict(payload.get("metadata") or {}), **{key: track[key] for key in ("mode", "scope_id", "track_id", "repository_id", "work_session_id", "topic_id")}}
         attachment_ids = [str(item) for item in payload.get("attachment_ids", [])]
         if attachment_ids and self.application is not None:
@@ -41,6 +40,12 @@ class WebChannel:
                 text = f"{text}\n\n<attached_context>\n{attachment_text}\n</attached_context>"
             metadata["attachment_ids"] = attachment_ids
             metadata["attachment_images"] = attachment_images
+        # Create the externally visible Run before returning the SSE URL. The coordinator
+        # remains its lifecycle owner and will only reuse this accepted record.
+        if self.application is not None:
+            self.application.run_coordinator.ensure_run(
+                RunRequest(request_id, "local", self.channel_id, conversation_id, track["mode"], track["track_id"], text, metadata)
+            )
         message = ChannelMessage(self.channel_id, "local", conversation_id, text, ChannelKind.WEB, TrustLevel.HIGH, list(payload.get("files") or []), list(payload.get("images") or []) + metadata.get("attachment_images", []), metadata)
         threading.Thread(target=self._run_request, args=(request_id, message, track), daemon=True, name=f"web-request-{request_id[:8]}").start()
         return {"ok": True, "request_id": request_id, "conversation_id": conversation_id, "track": track, "stream_url": f"/stream?request_id={request_id}"}
@@ -134,38 +139,22 @@ class WebChannel:
 
     def _run_request(self, request_id: str, message: ChannelMessage, track: dict[str, Any]) -> None:
         self._local.request_id = request_id
-        self.run_events.publish(request_id, "running", {"track": track})
         try:
             request = RunRequest(request_id, message.user_id, message.channel_id, message.conversation_id, track["mode"], track["track_id"], message.text, {**message.metadata, "repository_root":track.get("repository_root", "")})
-            result = self.application.run_coordinator.execute(request, emit=lambda kind, payload: self._on_runtime_event(request_id, kind, payload))
-            if self.run_events.is_cancelled(request_id):
-                self.run_events.finish(request_id, "cancelled", error_code="user_requested", error_message="Run cancelled", payload={"track": track})
-            else:
-                status = str(result.status or "failed").lower()
-                if status == "completed":
-                    terminal = "completed"
-                elif status in {"cancelled", "timed_out"}:
-                    terminal = status
-                else:
-                    terminal = "failed"
-                self.run_events.finish(
-                    request_id,
-                    terminal,
-                    content=result.output if terminal == "completed" else "",
-                    error_code="" if terminal == "completed" else status,
-                    error_message=result.error if terminal != "completed" else "",
-                    metadata=result.metadata,
-                    payload={"track": track},
-                )
+            self.application.run_coordinator.execute(request, emit=lambda kind, payload: self._on_runtime_event(request_id, kind, payload))
         except Exception as exc:
-            self.run_events.finish(request_id, "failed", error_code=type(exc).__name__, error_message=f"{type(exc).__name__}: {exc}", payload={"track": track})
+            # Coordinator normally owns error finalization; this only protects construction failures.
+            if self.run_events.state(request_id) is not None:
+                self.run_events.finish(request_id, "failed", error_code=type(exc).__name__, error_message=f"{type(exc).__name__}: {exc}", payload={"track": track})
         finally:
             self._local.request_id = ""
             self.cleanup_request(request_id)
 
     def _on_runtime_event(self, request_id: str, event_type: str, payload: dict | None) -> None:
         mapped = {"loop.turn.started":"phase","loop.turn.completed":"phase","loop.turn.failed":"phase","llm.request.started":"llm_start","llm.request.completed":"llm_end","llm.request.failed":"llm_error","tool.call.started":"tool_start","tool.call.completed":"tool_end","tool.call.blocked":"tool_blocked","checkpoint.saved":"checkpoint"}.get(event_type,"event")
-        self._enqueue(request_id, {"type":mapped,"event":event_type,"data":payload or {}})
+        # Coordinator already persisted canonical events. The bridge adds only transport-facing phase events.
+        if event_type not in {"running", "waiting_input", "waiting_confirmation"}:
+            self._enqueue(request_id, {"type":mapped,"event":event_type,"data":payload or {}})
 
     def _enqueue(self, request_id: str, event: dict) -> None:
         event_type = str(event.get("type") or "event")

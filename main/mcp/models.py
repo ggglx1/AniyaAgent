@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass, field
 
 @dataclass
 class McpServerConfig:
-    id: str; name: str; transport: str; command_or_url: str; enabled: bool = True; trust_level: str = "read_only"; allowed_modes: list[str] = field(default_factory=lambda:["assistant"]); timeout_seconds: int = 30
+    id: str; name: str; transport: str; command_or_url: str; enabled: bool = True; trust_level: str = "read_only"; allowed_modes: list[str] = field(default_factory=lambda:["assistant"]); timeout_seconds: int = 30; capabilities: list[dict] = field(default_factory=list)
     def to_dict(self): return asdict(self)
 
 

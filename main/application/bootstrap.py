@@ -26,8 +26,8 @@ class AniyaApplication:
         self.assistant = PersonalAssistantService(main_loop.get_channel_runtime(), main_loop.conversation_memory)
         self.coding = CodingAssistantService(main_loop.WORKDIR, self.repository, main_loop.get_channel_runtime)
         self.qa = QaService(main_loop.llm_gateway, main_loop.MODEL, self.repository)
-        self.scheduler = SchedulerService(main_loop, self.repository)
         self.run_coordinator = RunCoordinator(self)
+        self.scheduler = SchedulerService(main_loop, self.repository, self)
 
     def web_runtime(self): return self._runtime.get_channel_runtime()
     def start_scheduler(self): return self.lifecycle.start_once(self.scheduler.start)

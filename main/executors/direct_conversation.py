@@ -8,12 +8,16 @@ class DirectConversationExecutor:
     def __init__(self, application): self.app = application
     def execute(self, request, context, decision):
         loop = self.app.runtime
-        memory = loop.memory_context.assemble(request.text, mode="assistant")
+        context["token"].check()
+        built = context["built_context"]
+        memory = built.text
         system = "You are Aniya, a warm, truthful personal companion. Reply directly. Do not claim to perform actions or use tools."
-        response = loop.llm_gateway.messages.create(task_type="main", model=loop.MODEL, max_tokens=1024, system=system, messages=[{"role":"user","content":f"{memory}\n\n{request.text}" if memory else request.text}], tools=[])
+        text = f"{memory}\n\n{request.text}" if memory else request.text
+        image_blocks = self.app.attachments.model_image_blocks(list(request.metadata.get("attachment_ids") or []))
+        content = [{"type": "text", "text": text}, *image_blocks] if image_blocks else text
+        response = loop.llm_gateway.messages.create(task_type="main", model=loop.MODEL, max_tokens=1024, system=system, messages=[{"role":"user","content":content}], tools=[])
+        context["token"].check()
         output = loop.extract_text(response.content).strip()
-        repository = self.app.repository
-        user = repository.append_track_message("user", request.text, mode="assistant", scope_id="personal", track_id="assistant:personal", metadata={"run_id":request.run_id, "executor":"direct"})
-        assistant = repository.append_track_message("assistant", output, mode="assistant", scope_id="personal", track_id="assistant:personal", reply_to_message_id=user.message_id, metadata={"run_id":request.run_id, "executor":"direct"})
-        repository.request_maintenance("memory_pipeline", {"message_ids":[user.message_id, assistant.message_id], "mode":"assistant"})
-        return UnifiedRunResult(request.run_id, "completed", output, metadata={"executor":"direct_conversation", "factual_message_ids":[user.message_id, assistant.message_id]})
+        if not output:
+            return UnifiedRunResult(request.run_id, "failed", error="Model returned an empty response.", error_code="empty_model_output", metadata={"executor":"direct_conversation"})
+        return UnifiedRunResult(request.run_id, "completed", output, metadata={"executor":"direct_conversation", "memory_sources":built.source_ids, "attachment_sources":[item.get("attachment_id", "") for item in image_blocks]})

@@ -9,11 +9,13 @@ from pathlib import Path
 
 
 TERMINAL = {"completed", "failed", "cancelled", "timed_out"}
-ACTIVE = {"accepted", "queued", "running", "waiting_permission", "reconnecting"}
+ACTIVE = {"accepted", "queued", "running", "waiting_input", "waiting_confirmation", "waiting_permission", "reconnecting"}
 EVENT_STATUS = {
     "accepted": "accepted",
     "queued": "queued",
     "running": "running",
+    "waiting_input": "waiting_input",
+    "waiting_confirmation": "waiting_confirmation",
     "permission_request": "waiting_permission",
     "waiting_permission": "waiting_permission",
     "reconnecting": "reconnecting",
@@ -139,10 +141,16 @@ class RunEventStore:
             event = self._insert_event(
                 connection, run_id, event_id, event_type, data, now
             )
-            connection.execute(
-                "UPDATE runs SET status=?, last_event_id=?, updated_at=? WHERE request_id=?",
-                (status, event_id, now, run_id),
-            )
+            if event_type in {"waiting_input", "waiting_confirmation"}:
+                connection.execute(
+                    "UPDATE runs SET status=?, last_event_id=?, final_content=?, metadata_json=?, updated_at=? WHERE request_id=?",
+                    (status, event_id, str(data.get("content") or ""), json.dumps(data.get("metadata") or {}, ensure_ascii=False), now, run_id),
+                )
+            else:
+                connection.execute(
+                    "UPDATE runs SET status=?, last_event_id=?, updated_at=? WHERE request_id=?",
+                    (status, event_id, now, run_id),
+                )
             self._trim_events(connection, run_id)
             connection.execute("COMMIT")
             self._changed.notify_all()
@@ -356,6 +364,7 @@ class RunEventStore:
         }
 
     def _state_record(self, row) -> dict:
+        metadata = json.loads(row["metadata_json"] or "{}")
         return {
             "request_id": row["request_id"],
             "run_id": row["request_id"],
@@ -368,7 +377,11 @@ class RunEventStore:
             "final_content": row["final_content"],
             "error_code": row["error_code"],
             "error_message": row["error_message"],
-            "metadata": json.loads(row["metadata_json"] or "{}"),
+            "metadata": metadata,
+            "route": metadata.get("route", {}),
+            "executor": metadata.get("executor", ""),
+            "usage": metadata.get("usage", metadata.get("budget", {})),
+            "pending_action": metadata.get("pending_action"),
             "cancel_requested": bool(row["cancel_requested"]),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],

@@ -23,7 +23,7 @@ class PersonalMemoryRetriever:
             try:
                 semantic_ids = set(self.semantic_provider.search(query, user_id, max(limit * 4, 20)))
                 known = {record.id for record in candidates}
-                candidates.extend(record for record in self.manager.list(user_id=user_id, status="active", limit=500) if record.id in semantic_ids and record.id not in known)
+                candidates.extend(record for record in self.manager.list(user_id=user_id, status="active", limit=500) if record.id in semantic_ids and record.id in visible_ids and record.id not in known)
             except Exception:
                 pass
         now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

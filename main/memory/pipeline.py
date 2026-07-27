@@ -33,41 +33,49 @@ class StructuredMemoryPipeline:
         self.intent_guard = IntentGuard()
 
     def process(self, message_ids: list[str], user_id: str = "local", mode: str = "assistant", repository_id: str = "") -> list[str]:
-        records = [item for item in self.conversation.repository.recent_messages(200) if item.message_id in set(message_ids)]
+        records = self.conversation.repository.track_messages_by_ids(message_ids, mode=mode)
         records = [item for item in records if not self.ledger.processed(item.message_id, self.extractor_version)]
+        claimed = [item for item in records if self.ledger.claim(item.message_id, self.extractor_version)]
+        records = claimed
         if not records:
             return []
-        created = []
-        self.route_tasks_and_reminders(records)
-        for raw in self.extractor.extract(records) + self.llm_extractor.extract(records):
-            candidate = self.validator.validate(self.classifier.classify(raw), {item.message_id for item in records})
-            if candidate is None:
-                continue
-            decision = self.policy.decide(candidate)
-            scope = self.scope_for(mode, repository_id, candidate)
-            candidate["scope"] = scope
-            candidate["repository_id"] = repository_id
-            if decision == "route_profile":
-                self.update_profile(candidate)
-                continue
-            if decision not in {"write_active", "write_pending"}:
-                continue
-            resolution, existing = self.resolver.resolve(candidate, user_id)
-            if resolution == "duplicate":
-                continue
-            if resolution == "conflict":
-                record = self.manager.supersede(existing.id, candidate["content"], user_id=user_id, reason="new explicit conversation fact")
-            else:
-                record = self.manager.add_scoped(
-                    content=candidate["content"], memory_type=candidate["memory_type"], user_id=user_id,
-                    explicit=decision == "write_active", importance=candidate["importance"], confidence=candidate["confidence"],
-                    tags=candidate["tags"], entity_refs=candidate["entity_refs"], source="conversation_explicit" if candidate["explicit"] else "conversation_inference",
-                    origin=candidate["origin"], valid_until=candidate["valid_until"], metadata={"source_message_ids": candidate["source_message_ids"]}, reason="conversation memory pipeline", scope=scope, repository_id=repository_id,
-                )
-            self.conversation.repository.link_long_term_memory(record.id, candidate["source_message_ids"], "explicit_source" if candidate["explicit"] else "inferred_from")
-            created.append(record.id)
-        self.ledger.mark([item.message_id for item in records], self.extractor_version, self.manager.now_iso())
-        return created
+        try:
+            created = []
+            # Domain commands are executed by StructuredActionExecutor. Memory extraction must
+            # never recreate tasks or reminders from factual text after the user has received a reply.
+            for raw in self.extractor.extract(records) + self.llm_extractor.extract(records):
+                candidate = self.validator.validate(self.classifier.classify(raw), {item.message_id for item in records})
+                if candidate is None:
+                    continue
+                decision = self.policy.decide(candidate)
+                scope = self.scope_for(mode, repository_id, candidate)
+                candidate["scope"] = scope
+                candidate["repository_id"] = repository_id
+                if decision == "route_profile":
+                    self.update_profile(candidate)
+                    continue
+                if decision not in {"write_active", "write_pending"}:
+                    continue
+                resolution, existing = self.resolver.resolve(candidate, user_id)
+                if resolution == "duplicate":
+                    continue
+                if resolution == "conflict":
+                    record = self.manager.supersede(existing.id, candidate["content"], user_id=user_id, reason="new explicit conversation fact")
+                else:
+                    record = self.manager.add_scoped(
+                        content=candidate["content"], memory_type=candidate["memory_type"], user_id=user_id,
+                        explicit=decision == "write_active", importance=candidate["importance"], confidence=candidate["confidence"],
+                        tags=candidate["tags"], entity_refs=candidate["entity_refs"], source="conversation_explicit" if candidate["explicit"] else "conversation_inference",
+                        origin=candidate["origin"], valid_until=candidate["valid_until"], metadata={"source_message_ids": candidate["source_message_ids"]}, reason="conversation memory pipeline", scope=scope, repository_id=repository_id,
+                    )
+                self.conversation.repository.link_long_term_memory(record.id, candidate["source_message_ids"], "explicit_source" if candidate["explicit"] else "inferred_from")
+                created.append(record.id)
+            self.ledger.mark([item.message_id for item in records], self.extractor_version, self.manager.now_iso())
+            return created
+        except Exception as exc:
+            for item in records:
+                self.ledger.fail(item.message_id, self.extractor_version, f"{type(exc).__name__}: {exc}")
+            raise
 
     def route_tasks_and_reminders(self, records: list) -> None:
         if self.personal_state is None:

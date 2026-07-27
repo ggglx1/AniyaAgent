@@ -10,6 +10,12 @@ class DeliberativeExecutor:
         # Channel imports are intentionally delayed to keep runtime composition free of Web cycles.
         from main.channel.base import ChannelMessage
         from main.channel.types import ChannelKind, TrustLevel
-        message = ChannelMessage("web", request.user_id, request.conversation_id, request.text, ChannelKind.WEB, TrustLevel.HIGH, metadata={**request.metadata, "executor":"deliberative"})
-        result = self.app.web_runtime().handle_message(message, deliver=False, event_callback=context["emit"])
-        return UnifiedRunResult(request.run_id, result.status, result.text, result.error, {**result.metadata, "executor":"deliberative"})
+        context["token"].check()
+        runtime = self.app.web_runtime().agent_runtime
+        result = runtime.run_with_context(
+            session_id=f"{request.channel_id}:{request.conversation_id}", user_text=request.text,
+            channel_context={"channel_id": request.channel_id, "user_id": request.user_id, "conversation_id": request.conversation_id, "kind": "web", "metadata": request.metadata},
+            event_callback=context["emit"], external_run_id=request.run_id, cancellation_token=context["token"], acquire_lock=False, archive_facts=False,
+        )
+        context["token"].check()
+        return UnifiedRunResult(request.run_id, result.status, result.output, result.error, metadata={**(result.memory_sources or {}), "executor":"deliberative"})

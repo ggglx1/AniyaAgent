@@ -301,6 +301,23 @@ class ConversationMemoryRepository:
             ).fetchall()
         return [self.to_track_message(row) for row in reversed(rows)]
 
+    def track_messages_by_ids(self, message_ids: list[str], *, mode: str = "assistant", track_id: str = "") -> list[ConversationMessage]:
+        """Fetch canonical facts by event payload IDs instead of relying on a global recent window."""
+        ids = [str(item) for item in message_ids if item]
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        sql = f"SELECT * FROM conversation_track_messages WHERE message_id IN ({placeholders}) AND redacted_at=''"
+        args: list[object] = ids
+        if mode:
+            sql += " AND mode=?"; args.append(mode)
+        if track_id:
+            sql += " AND track_id=?"; args.append(track_id)
+        sql += " ORDER BY sequence"
+        with self.connect() as connection:
+            rows = connection.execute(sql, args).fetchall()
+        return [self.to_track_message(row) for row in rows]
+
     def messages_for_day(self, local_date: str, include_redacted: bool = False) -> list[ConversationMessage]:
         with self.connect() as connection:
             sql = "SELECT * FROM conversation_track_messages WHERE mode='assistant' AND track_id='assistant:personal' AND day_date=?"

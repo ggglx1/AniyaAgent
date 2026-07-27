@@ -84,12 +84,16 @@ class AgentRuntime:
         user_text: str,
         channel_context: dict,
         event_callback: Callable[[str, dict], None] | None = None,
+        external_run_id: str = "",
+        cancellation_token=None,
+        acquire_lock: bool = True,
+        archive_facts: bool = True,
     ) -> RunResult:
-        run_id = self.new_run_id()
+        run_id = external_run_id or self.new_run_id()
         lock = self.lock_for(session_id)
         started_at = time.time()
 
-        if not lock.acquire(blocking=False):
+        if acquire_lock and not lock.acquire(blocking=False):
             result = RunResult(
                 run_id=run_id,
                 session_id=session_id,
@@ -117,7 +121,7 @@ class AgentRuntime:
             initial_message_count = len(messages)
             messages.append({"role": "user", "content": user_text})
             factual_ids: list[str] = []
-            if self.is_web_context(channel_context):
+            if archive_facts and self.is_web_context(channel_context):
                 timezone_name = self.timezone_for_web()
                 # Web only records facts and dirty work. Scheduler is the sole maintenance owner.
                 self.conversation_memory.repository.request_maintenance("memory_maintenance", {"timezone": timezone_name})
@@ -130,14 +134,16 @@ class AgentRuntime:
             checkpoint_path = self.conversations.checkpoint(session_id, run_id, messages)
             self.audit.write(run_id, "checkpoint.before", {"path": str(checkpoint_path)})
 
-            deadline = RunDeadline.after(self.max_run_seconds)
-            bind_runtime(run_id, session_id, self.audit, self.conversations, event_callback, deadline)
+            deadline = RunDeadline(cancellation_token.deadline_at) if cancellation_token is not None else RunDeadline.after(self.max_run_seconds)
+            bind_runtime(run_id, session_id, self.audit, self.conversations, event_callback, deadline, cancellation_token)
             self.agent_loop(messages)
+            if cancellation_token is not None:
+                cancellation_token.check()
             deadline.require_remaining()
 
             self.ensure_clean_or_recover(session_id, run_id, messages)
             self.conversations.save(session_id, messages)
-            if self.is_web_context(channel_context):
+            if archive_facts and self.is_web_context(channel_context):
                 factual_ids.extend(
                     self.conversation_memory.append_runtime_messages(
                         messages, initial_message_count + 1, self.timezone_for_web()
@@ -199,7 +205,8 @@ class AgentRuntime:
             return result
         finally:
             clear_runtime()
-            lock.release()
+            if acquire_lock:
+                lock.release()
 
     def load_clean_context(self, session_id: str, run_id: str) -> list:
         # A failed run writes its repaired state to working.json. Prefer it when it

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from enum import StrEnum
 from typing import Any
 
 
@@ -19,5 +20,23 @@ class RouteDecision:
 
 @dataclass
 class UnifiedRunResult:
-    run_id: str; status: str; output: str = ""; error: str = ""; metadata: dict = field(default_factory=dict)
+    run_id: str; status: str; output: str = ""; error: str = ""; error_code: str = ""; metadata: dict = field(default_factory=dict)
     def to_dict(self) -> dict: return asdict(self)
+class RunStatus(StrEnum):
+    ACCEPTED = "accepted"
+    QUEUED = "queued"
+    RUNNING = "running"
+    WAITING_INPUT = "waiting_input"
+    WAITING_CONFIRMATION = "waiting_confirmation"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    TIMED_OUT = "timed_out"
+
+
+TERMINAL_RUN_STATUSES = {
+    RunStatus.COMPLETED.value,
+    RunStatus.FAILED.value,
+    RunStatus.CANCELLED.value,
+    RunStatus.TIMED_OUT.value,
+}
