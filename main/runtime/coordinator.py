@@ -103,6 +103,7 @@ class RunCoordinator:
             metadata["capabilities"] = [item.id for item in context["capabilities"]]
         result.metadata = metadata
         if status in {RunStatus.WAITING_INPUT.value, RunStatus.WAITING_CONFIRMATION.value}:
+            self.persist_facts(request, result, schedule_memory=False)
             self.run_events.publish(request.run_id, status, {"content": result.output, "metadata": metadata, "error_code": result.error_code})
             return result
         if status not in TERMINAL_RUN_STATUSES:
@@ -110,24 +111,37 @@ class RunCoordinator:
         if result.status == RunStatus.COMPLETED.value:
             self.persist_facts(request, result)
             self.run_events.finish(request.run_id, result.status, content=result.output, metadata=result.metadata)
-            self.outbox.publish("conversation.completed", request.run_id, {"track_id": request.track_id, "mode": request.mode, "factual_message_ids": result.metadata.get("factual_message_ids", [])})
+            superseded = str(request.metadata.get("supersedes_waiting_run_id") or "")
+            if superseded:
+                self.run_events.supersede_waiting(superseded, request.run_id)
+            if result.metadata.get("executor") != "proactive":
+                event_type = "coding.completed" if request.mode == "coding" else (
+                    "qa.conversation.completed" if request.mode == "qa" else
+                    "assistant.action.completed" if result.metadata.get("executor") == "structured_action" else
+                    "deliberative.completed" if result.metadata.get("executor") == "deliberative" else
+                    "assistant.conversation.completed"
+                )
+                self.outbox.publish(event_type, request.run_id, {"track_id": request.track_id, "mode": request.mode, "repository_id": request.metadata.get("repository_id", ""), "work_session_id": request.metadata.get("work_session_id", ""), "factual_message_ids": result.metadata.get("factual_message_ids", [])})
             for action in result.metadata.get("executed_actions", []):
                 self.outbox.publish("action.executed", request.run_id, {"track_id": request.track_id, "action": action})
         else:
             self.run_events.finish(request.run_id, result.status, error_code=result.error_code or result.status, error_message=result.error, metadata=result.metadata)
-            self.outbox.publish("run.failed", request.run_id, {"status": result.status, "error_code": result.error_code})
+            self.outbox.publish("run.failed", request.run_id, {"status": result.status, "error_code": result.error_code, "mode": request.mode})
         return result
 
-    def persist_facts(self, request: RunRequest, result: UnifiedRunResult) -> None:
-        # Legacy deliberative/coding runtimes already own their track archive during migration.
-        if result.metadata.get("facts_persisted") or result.metadata.get("executor") in {"deliberative", "coding"}:
+    def persist_facts(self, request: RunRequest, result: UnifiedRunResult, *, schedule_memory: bool = True) -> None:
+        if result.metadata.get("facts_persisted") or result.metadata.get("executor") == "proactive":
             return
         scope = request.metadata.get("scope_id", "personal" if request.mode == "assistant" else "")
-        user = self.app.repository.append_track_message("user", request.text, mode=request.mode, scope_id=scope, track_id=request.track_id, repository_id=request.metadata.get("repository_id", ""), work_session_id=request.metadata.get("work_session_id", ""), topic_id=request.metadata.get("topic_id", ""), metadata={"run_id": request.run_id, "executor": result.metadata.get("executor", "")})
-        assistant = self.app.repository.append_track_message("assistant", result.output, mode=request.mode, scope_id=scope, track_id=request.track_id, repository_id=request.metadata.get("repository_id", ""), work_session_id=request.metadata.get("work_session_id", ""), topic_id=request.metadata.get("topic_id", ""), reply_to_message_id=user.message_id, metadata={"run_id": request.run_id, "executor": result.metadata.get("executor", "")})
+        retention = "qa_30_days" if request.mode == "qa" else "long_term"
+        expires_at = ""
+        if request.mode == "qa":
+            from datetime import datetime, timedelta, timezone
+            expires_at = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat().replace("+00:00", "Z")
+        user = self.app.repository.append_track_message("user", request.text, mode=request.mode, scope_id=scope, track_id=request.track_id, repository_id=request.metadata.get("repository_id", ""), work_session_id=request.metadata.get("work_session_id", ""), topic_id=request.metadata.get("topic_id", ""), retention_class=retention, expires_at=expires_at, metadata={"run_id": request.run_id, "executor": result.metadata.get("executor", "")})
+        assistant = self.app.repository.append_track_message("assistant", result.output, mode=request.mode, scope_id=scope, track_id=request.track_id, repository_id=request.metadata.get("repository_id", ""), work_session_id=request.metadata.get("work_session_id", ""), topic_id=request.metadata.get("topic_id", ""), retention_class=retention, expires_at=expires_at, reply_to_message_id=user.message_id, metadata={"run_id": request.run_id, "executor": result.metadata.get("executor", "")})
         result.metadata["factual_message_ids"] = [user.message_id, assistant.message_id]
-        if request.mode == "assistant":
-            self.app.repository.request_maintenance("memory_pipeline", {"message_ids": result.metadata["factual_message_ids"], "mode": "assistant", "track_id": request.track_id})
+        # Memory Pipeline is invoked only by the durable Domain Event consumer.
 
     def lock_for(self, key: str) -> threading.Lock:
         with self._guard:

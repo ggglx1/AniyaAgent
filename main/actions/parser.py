@@ -20,18 +20,18 @@ class StructuredCommandParser:
     }
     NEGATED = ("假如", "如果", "怎么做", "会怎样", "示例", "测试说明", "不要创建", "不用创建")
 
-    def parse(self, text: str, run_id: str, *, timezone_name: str = "Asia/Shanghai", pending: dict | None = None) -> StructuredCommand | None:
+    def parse(self, text: str, run_id: str, *, timezone_name: str = "Asia/Shanghai", pending: dict | None = None, source_message_id: str = "") -> StructuredCommand | None:
         text = text.strip()
         if pending is not None:
             previous = dict(pending["command"])
             arguments = dict(previous.get("arguments") or {})
             if pending.get("confirmation_state") == "confirmation_required" and text.lower() in {"确认", "确认执行", "confirm", "yes", "是"}:
-                return self.command(run_id, previous["action"], arguments, text)
+                return self.command(run_id, previous["action"], arguments, text, previous.get("source_message_id", ""))
             if "scheduled_at" in pending.get("missing_fields", []):
                 parsed = self.parse_time(text, timezone_name)
                 if parsed:
                     arguments["scheduled_at"] = parsed
-                    return self.command(run_id, previous["action"], arguments, text)
+                    return self.command(run_id, previous["action"], arguments, text, previous.get("source_message_id", ""))
             return None
         if any(marker in text for marker in self.NEGATED) and "不要忘了提醒我" not in text:
             return None
@@ -40,12 +40,14 @@ class StructuredCommandParser:
                 if any(marker in text for marker in markers):
                     action = f"{domain}.{operation}"
                     args = self.arguments(action, text, timezone_name)
-                    return self.command(run_id, action, args, text)
+                    return self.command(run_id, action, args, text, source_message_id)
         return None
 
-    def command(self, run_id: str, action: str, arguments: dict, text: str) -> StructuredCommand:
-        fingerprint = hashlib.sha256(f"{run_id}:{action}:{arguments}".encode()).hexdigest()
-        return StructuredCommand(f"cmd_{uuid.uuid4().hex[:16]}", run_id, action=action, arguments=arguments, idempotency_key=fingerprint)
+    def command(self, run_id: str, action: str, arguments: dict, text: str, source_message_id: str = "") -> StructuredCommand:
+        normalized = re.sub(r"\s+", " ", text).strip().casefold()
+        source = source_message_id or hashlib.sha256(normalized.encode()).hexdigest()
+        fingerprint = hashlib.sha256(f"{source}:{action}:{sorted(arguments.items())}".encode()).hexdigest()
+        return StructuredCommand(f"cmd_{uuid.uuid4().hex[:16]}", run_id, source_message_id=source_message_id, action=action, arguments=arguments, idempotency_key=fingerprint)
 
     def arguments(self, action: str, text: str, timezone_name: str) -> dict:
         entity_id = self.entity_id(text)

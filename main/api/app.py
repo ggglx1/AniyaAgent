@@ -48,7 +48,8 @@ def create_api(application, bridge, auth_token: str = "") -> FastAPI:
     @conversation.get("/state")
     async def state(data=Depends(services)):
         bridge=data["bridge"]
-        return ok(modes={mode:bridge.resolve_track({"mode":mode}, create=True) for mode in ("assistant","qa","coding")})
+        modes = [bridge.resolve_track({"mode":mode}, create=True) for mode in ("assistant","qa","coding")]
+        return ok(modes=modes, mode_map={item["mode"]: item for item in modes})
     @conversation.get("/history")
     async def history(mode: str = "assistant", scope_id: str = "personal", track_id: str = "assistant:personal", limit: int = Query(50, ge=1, le=500), before_sequence: int | None = Query(None, ge=1), data=Depends(services)):
         memory = data["memory"]

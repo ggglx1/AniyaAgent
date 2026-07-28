@@ -84,7 +84,7 @@ type SseEvent = {
   metadata?: Record<string, unknown>;
 };
 
-type RunStatus = 'accepted' | 'queued' | 'running' | 'waiting_permission' | 'reconnecting' | 'completed' | 'failed' | 'cancelled' | 'timed_out' | 'unknown';
+type RunStatus = 'accepted' | 'queued' | 'running' | 'waiting_permission' | 'waiting_input' | 'waiting_confirmation' | 'reconnecting' | 'completed' | 'failed' | 'cancelled' | 'timed_out' | 'unknown';
 
 type RunSnapshot = {
   requestId: string;
@@ -315,6 +315,7 @@ class WebChannelBridge {
     const submit = await this.postJson('/message', {
       text: content,
       user_id: 'local',
+      client_message_id: `web_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`,
       ...track,
     });
     const requestId = String(submit.request_id || '');
@@ -591,6 +592,15 @@ class WebChannelBridge {
           });
         }
         return false;
+      case 'waiting_input':
+      case 'waiting_confirmation':
+        run.status = event.type;
+        run.terminal = true; // paused is transport-terminal; continuation has a new Run ID.
+        run.finalContent = String(event.content || '');
+        latestStatus = event.type;
+        if (owner && run.finalContent) sendJson(owner, { type: 'agent.output', data: { role: 'assistant', content: run.finalContent } });
+        if (owner) sendJson(owner, { type: 'agent.status', data: { status: event.type, requestId: run.requestId } });
+        return true;
       case 'completed':
       case 'failed':
       case 'cancelled':
@@ -635,7 +645,7 @@ class WebChannelBridge {
     run.errorMessage = result.errorMessage || '';
     latestStatus = status === 'completed' ? 'ready' : status;
     const owner = run.owner;
-    if (owner && status === 'completed' && run.finalContent) {
+    if (owner && (status === 'completed' || status === 'waiting_input' || status === 'waiting_confirmation') && run.finalContent) {
       sendJson(owner, { type: 'agent.output', data: { role: 'assistant', content: run.finalContent } });
     }
     if (owner && status !== 'completed' && run.errorMessage) {
@@ -664,7 +674,7 @@ class WebChannelBridge {
   }
 
   private isTerminal(status: string): status is RunStatus {
-    return ['completed', 'failed', 'cancelled', 'timed_out'].includes(status);
+    return ['completed', 'failed', 'cancelled', 'timed_out', 'waiting_input', 'waiting_confirmation'].includes(status);
   }
 
   private headers(extra: Record<string, string> = {}): Record<string, string> {

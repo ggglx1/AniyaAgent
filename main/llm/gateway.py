@@ -1,5 +1,6 @@
 import os
 import queue
+import random
 import threading
 import time
 from dataclasses import dataclass, field
@@ -24,6 +25,7 @@ class LlmRequest:
     queued_at: float = field(default_factory=time.perf_counter)
     context: dict = field(default_factory=dict)
     cancellation_token: object | None = None
+    attempts: list[dict] = field(default_factory=list)
 
 
 class QueuedMessagesClient:
@@ -64,7 +66,12 @@ class LlmGateway:
         self.start_lane_workers("background", int(os.getenv("LLM_BACKGROUND_WORKERS", "1")))
 
     def create_message(self, *, task_type: str = "main", **kwargs):
+        # Runtime controls are local-only metadata.  Never forward them to a provider.
+        run_context = dict(kwargs.pop("run_context", {}) or {})
+        explicit_token = kwargs.pop("cancellation_token", None)
         remaining = RuntimeContext.remaining_seconds()
+        if explicit_token is not None:
+            remaining = explicit_token.remaining_seconds()
         if remaining is not None:
             kwargs["timeout"] = min(float(kwargs.get("timeout", 120)), remaining)
         sequence = self.next_sequence()
@@ -72,8 +79,8 @@ class LlmGateway:
             task_type=task_type,
             kwargs=kwargs,
             sequence=sequence,
-            context=current_request_context(),
-            cancellation_token=getattr(RuntimeContext.current_state(), "cancellation_token", None),
+            context={**current_request_context(), **run_context},
+            cancellation_token=explicit_token or getattr(RuntimeContext.current_state(), "cancellation_token", None),
         )
         lane = self.lane_for_task(task_type)
         self.queues[lane].put((self.priority_for_task(task_type), sequence, request))
@@ -133,7 +140,7 @@ class LlmGateway:
                         f"[llm queue:{lane}] {request.task_type} waited {waited:.2f}s "
                         f"(pending={requests.qsize()})"
                     )
-                request.response = self.base_client.messages.create(**kwargs)
+                request.response = self._call_with_retry(kwargs, request.cancellation_token, request)
                 if request.cancellation_token is not None:
                     request.cancellation_token.check()
             except BaseException as exc:
@@ -142,6 +149,35 @@ class LlmGateway:
                 self.record_usage(request, lane, started_at, resolved_model)
                 request.event.set()
                 requests.task_done()
+
+    def _call_with_retry(self, kwargs: dict, cancellation_token=None, request: LlmRequest | None = None):
+        """Retry only transient provider failures; business/tool failures never arrive here."""
+        last_error = None
+        for attempt in range(3):
+            if cancellation_token is not None:
+                cancellation_token.check()
+            try:
+                response = self.base_client.messages.create(**kwargs)
+                if request is not None:
+                    request.attempts.append({"attempt": attempt + 1, "error": "", "response": response})
+                return response
+            except Exception as exc:
+                last_error = exc
+                if request is not None:
+                    request.attempts.append({"attempt": attempt + 1, "error": f"{type(exc).__name__}: {exc}", "response": None})
+                message = str(exc).lower()
+                transient = any(item in message for item in ("429", "503", "connection", "timeout", "temporar", "overload"))
+                if not transient or attempt == 2:
+                    raise
+                delay = min(2.0, 0.25 * (2 ** attempt)) + random.uniform(0, 0.15)
+                if cancellation_token is not None:
+                    end = time.monotonic() + min(delay, cancellation_token.remaining_seconds())
+                    while time.monotonic() < end:
+                        cancellation_token.check()
+                        time.sleep(0.03)
+                else:
+                    time.sleep(delay)
+        raise last_error  # pragma: no cover - loop always returns or raises
 
     def record_usage(
         self,
@@ -170,8 +206,21 @@ class LlmGateway:
             **request_timing(started_at, request.queued_at),
             **normalize_usage(raw, provider),
         }
+        # ContextBuilder supplies source-level attribution without guessing from prompt text.
+        for block in request.context.get("context_blocks", []) or []:
+            kind = str(block.get("kind") or "context")
+            record[f"{kind}_tokens_estimated"] = int(block.get("estimated_tokens") or 0)
         try:
-            self.usage_recorder(record)
+            attempts = request.attempts or [{"attempt": 1, "error": record["request_error"], "response": request.response}]
+            for attempt in attempts:
+                response = attempt.get("response")
+                raw_attempt = getattr(response, "raw", {}) if response is not None else {}
+                self.usage_recorder({
+                    **record,
+                    "provider_attempt": attempt["attempt"],
+                    "request_error": attempt.get("error", ""),
+                    **normalize_usage(raw_attempt, provider),
+                })
         except Exception as exc:
             self.logger(f"[llm usage recorder] {type(exc).__name__}: {exc}")
 

@@ -24,10 +24,10 @@ class StructuredActionExecutor:
             return UnifiedRunResult(request.run_id, "completed", cached["output"], metadata={**cached.get("metadata", {}), "executor": "structured_action", "idempotent_replay": True})
         missing = self.missing(command)
         if missing:
-            pending = store.create(request.track_id, command.to_dict(), missing, owner_id=request.user_id)
+            pending = store.create(request.track_id, command.to_dict(), missing, owner_id=request.user_id, source_run_id=request.run_id, source_message_id=command.source_message_id, risk_level=command.risk_level)
             return UnifiedRunResult(request.run_id, "waiting_input", self.prompt_for(missing), metadata={"executor": "structured_action", "pending_action": pending, "missing_fields": missing})
         if decision.requires_confirmation:
-            pending = store.create(request.track_id, command.to_dict(), [], owner_id=request.user_id, confirmation_state="confirmation_required")
+            pending = store.create(request.track_id, command.to_dict(), [], owner_id=request.user_id, confirmation_state="confirmation_required", source_run_id=request.run_id, source_message_id=command.source_message_id, risk_level="write_irreversible")
             return UnifiedRunResult(request.run_id, "waiting_confirmation", "该操作不可逆。请明确回复“确认”后继续。", metadata={"executor": "structured_action", "pending_action": pending})
         output, metadata = self.dispatch(command)
         store.save_command_result(command.idempotency_key, {"output": output, "metadata": metadata})

@@ -28,7 +28,7 @@ type ChannelInfo = { channel_id: string; kind: string; trust_level: string };
 type ModelProvider = { name: string; configured: boolean; active: boolean; base_url: string; model: string };
 type ModelProvidersPayload = { active: string; providers: ModelProvider[] };
 
-type RunStatus = 'accepted' | 'queued' | 'running' | 'waiting_permission' | 'reconnecting' | 'completed' | 'failed' | 'cancelled' | 'timed_out' | 'unknown';
+type RunStatus = 'accepted' | 'queued' | 'running' | 'waiting_permission' | 'waiting_input' | 'waiting_confirmation' | 'reconnecting' | 'completed' | 'failed' | 'cancelled' | 'timed_out' | 'unknown';
 type RunSnapshot = {
   requestId: string;
   status: RunStatus;
@@ -349,6 +349,11 @@ function handleWsMessage(message: WsMessage): void {
 }
 
 function handleRunSnapshot(run: RunSnapshot): void {
+  if (['waiting_input', 'waiting_confirmation'].includes(run.status)) {
+    // A pending action is server-side durable. The browser must become editable.
+    storeRun(null); busy = false; setStatus(run.status, 'connected'); clearActivity(300);
+    updateComposerAvailability(); return;
+  }
   if (['completed', 'failed', 'cancelled', 'timed_out', 'unknown'].includes(run.status)) {
     storeRun(null);
     busy = false;
@@ -462,7 +467,7 @@ function setStatus(status: string, state: ConnectionState): void {
 
 function formatStatus(status: string): string {
   if (status.startsWith('starting')) return '正在醒来';
-  return ({ connecting: '正在醒来', reconnecting: '正在恢复', running: '正在处理', accepted: '正在处理', queued: '等待处理', waiting_permission: '等待确认', ready: '在你身边', busy: '正在处理', offline: '暂时离开', error: '连接异常', completed: '在你身边', failed: '处理失败', cancelled: '已取消', timed_out: '处理超时', unknown: '状态未知' } as Record<string, string>)[status] || status;
+  return ({ connecting: '正在醒来', reconnecting: '正在恢复', running: '正在处理', accepted: '正在处理', queued: '等待处理', waiting_permission: '等待确认', waiting_input: '等待补充信息', waiting_confirmation: '等待确认操作', ready: '在你身边', busy: '正在处理', offline: '暂时离开', error: '连接异常', completed: '在你身边', failed: '处理失败', cancelled: '已取消', timed_out: '处理超时', unknown: '状态未知' } as Record<string, string>)[status] || status;
 }
 
 function setActivity(text: string, autoHideMs = 0): void {

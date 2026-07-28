@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 TERMINAL = {"completed", "failed", "cancelled", "timed_out"}
-ACTIVE = {"accepted", "queued", "running", "waiting_input", "waiting_confirmation", "waiting_permission", "reconnecting"}
+ACTIVE = {"accepted", "queued", "running", "waiting_permission", "reconnecting"}
 EVENT_STATUS = {
     "accepted": "accepted",
     "queued": "queued",
@@ -282,6 +282,14 @@ class RunEventStore:
             self._changed.notify_all()
         return True
 
+    def supersede_waiting(self, run_id: str, resumed_by_run_id: str) -> bool:
+        """Close a paused front-end Run after its Pending Action is continued elsewhere."""
+        state = self.state(run_id)
+        if state is None or state["status"] not in {"waiting_input", "waiting_confirmation"}:
+            return False
+        self.finish(run_id, "cancelled", content=state.get("final_content", ""), error_code="resumed_by_new_run", metadata={**state.get("metadata", {}), "resumed_by_run_id": resumed_by_run_id})
+        return True
+
     def is_cancelled(self, run_id: str) -> bool:
         with self.connect() as connection:
             row = connection.execute(
@@ -292,7 +300,7 @@ class RunEventStore:
     def recover_interrupted(self) -> int:
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT request_id FROM runs WHERE status NOT IN ('completed','failed','cancelled','timed_out')"
+                "SELECT request_id FROM runs WHERE status NOT IN ('completed','failed','cancelled','timed_out','waiting_input','waiting_confirmation')"
             ).fetchall()
         for row in rows:
             self.finish(
@@ -382,6 +390,10 @@ class RunEventStore:
             "executor": metadata.get("executor", ""),
             "usage": metadata.get("usage", metadata.get("budget", {})),
             "pending_action": metadata.get("pending_action"),
+            "paused": row["status"] in {"waiting_input", "waiting_confirmation"},
+            "pending_action_id": (metadata.get("pending_action") or {}).get("pending_action_id", ""),
+            "missing_fields": metadata.get("missing_fields", []),
+            "prompt": row["final_content"] if row["status"] in {"waiting_input", "waiting_confirmation"} else "",
             "cancel_requested": bool(row["cancel_requested"]),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],

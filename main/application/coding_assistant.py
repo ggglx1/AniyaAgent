@@ -26,30 +26,33 @@ class CodingAssistantService:
     def history(self, repository_id: str, work_session_id: str, limit: int = 50):
         return self.repository.track_history(mode="coding", scope_id=repository_id, track_id=f"coding:{repository_id}:{work_session_id}", limit=limit)
 
-    def handle(self, text: str, repository_root: str | Path, work_session_id: str = "", token=None) -> dict:
+    def handle(self, text: str, repository_root: str | Path, work_session_id: str = "", token=None, run_context: dict | None = None) -> dict:
         """Independent Coding runtime with developer tools constrained to repository_root."""
         root = Path(repository_root).resolve(); repository_id = self.repository_id(root)
         session_id = work_session_id or self.new_work_session(root)["work_session_id"]
         track_id = f"coding:{repository_id}:{session_id}"
-        user_fact = self.repository.append_track_message("user", text, mode="coding", scope_id=repository_id, track_id=track_id, repository_id=repository_id, work_session_id=session_id)
         tools = Tools(root, capability_profile="developer")
         history = self.history(repository_id, session_id, limit=12)
         messages = [{"role": item.role, "content": item.content} for item in history if item.role in {"user", "assistant"}]
+        messages.append({"role": "user", "content": text})
         tool_facts = []
         budget = CodingBudget()
         artifacts = CodingArtifactStore(self.workdir)
         compactor = CodingTurnCompactor()
+        finished = False
         while budget.allow_request(messages):
             if token is not None: token.check()
             messages = compactor.compact(messages, artifacts)
             # The production composition lazily imports the shared LLM gateway. Coding-only
             # tools are constructed above, so Assistant never receives this capability set.
             from main.agent import main_loop
-            response = main_loop.llm_gateway.messages.create(task_type="main", model=main_loop.MODEL, max_tokens=8000, system=("You are a coding agent. Work only inside the configured repository. " "Use tools to inspect, edit, and validate code. Never access paths outside the repository."), messages=messages, tools=tools.definitions)
+            response = main_loop.llm_gateway.messages.create(task_type="main", model=main_loop.MODEL, max_tokens=8000, system=("You are a coding agent. Work only inside the configured repository. " "Use tools to inspect, edit, and validate code. Never access paths outside the repository."), messages=messages, tools=tools.definitions, cancellation_token=token, run_context=run_context)
             budget.record_request(messages, getattr(response, "raw", {}).get("usage") if getattr(response, "raw", None) else None)
             if token is not None: token.check()
             messages.append({"role": "assistant", "content": response.content})
-            if getattr(response, "stop_reason", "") != "tool_use": break
+            if getattr(response, "stop_reason", "") != "tool_use":
+                finished = True
+                break
             results = []
             for block in response.content:
                 if getattr(block, "type", "") != "tool_use": continue
@@ -69,7 +72,6 @@ class CodingAssistantService:
         if not answer and not budget.allow_request(messages): answer = "Coding budget reached before a final answer. The work session is saved and can be continued."
         for result in tool_facts:
             self.repository.append_track_message("tool", result, mode="coding", scope_id=repository_id, track_id=track_id, repository_id=repository_id, work_session_id=session_id)
-        assistant_fact = self.repository.append_track_message("assistant", answer, mode="coding", scope_id=repository_id, track_id=track_id, repository_id=repository_id, work_session_id=session_id)
-        self.repository.request_maintenance("project_summary", {"repository_id": repository_id, "work_session_id": session_id})
-        self.repository.request_maintenance("memory_pipeline", {"message_ids": [user_fact.message_id, assistant_fact.message_id], "mode": "coding", "repository_id": repository_id, "track_id": track_id})
-        return {"repository_id": repository_id, "work_session_id": session_id, "track_id": track_id, "text": answer, "budget": budget.__dict__, "factual_message_ids": [user_fact.message_id, assistant_fact.message_id], "status": "completed" if answer else "incomplete"}
+        exhausted = not finished and not budget.allow_request(messages)
+        status = "completed" if finished and answer else ("budget_exhausted" if exhausted else "incomplete")
+        return {"repository_id": repository_id, "work_session_id": session_id, "track_id": track_id, "text": answer, "budget": budget.__dict__, "checkpoint": {"track_id": track_id, "resume_with": session_id}, "status": status}

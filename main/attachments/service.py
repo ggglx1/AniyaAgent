@@ -12,7 +12,8 @@ from pathlib import Path
 
 class AttachmentService:
     """Private attachment storage with bounded text extraction for model context."""
-    allowed = {"text/plain", "text/markdown", "text/csv", "application/json", "application/pdf", "image/png", "image/jpeg", "image/webp"}
+    # Do not advertise PDF analysis until a real parser is installed.
+    allowed = {"text/plain", "text/markdown", "text/csv", "application/json", "image/png", "image/jpeg", "image/webp"}
     max_bytes = 20 * 1024 * 1024
 
     def __init__(self, workdir: Path):

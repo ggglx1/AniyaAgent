@@ -10,6 +10,8 @@ from .personal_assistant import PersonalAssistantService
 from .qa_service import QaService
 from .scheduler_service import SchedulerService
 from main.runtime import RunCoordinator
+from main.runtime.models import RunRequest
+import uuid
 
 
 class AniyaApplication:
@@ -34,17 +36,12 @@ class AniyaApplication:
     def stop(self): self.lifecycle.stop(self.scheduler.stop)
 
     def handle_mode(self, mode: str, text: str, **kwargs):
-        """Backend mode router used by Web/CLI adapters without exposing cross-track state."""
-        if mode == "assistant":
-            return self.assistant.handle(text, **kwargs)
-        if mode == "qa":
-            topic_id = kwargs.get("topic_id") or self.qa.active_topic()
-            return {"topic_id": topic_id, "text": self.qa.ask(text, topic_id)}
-        if mode == "coding":
-            repository_root = kwargs.get("repository_root")
-            if not repository_root: raise ValueError("repository_root is required for coding mode")
-            return self.coding.handle(text, repository_root, kwargs.get("work_session_id", ""))
-        raise ValueError(f"Unsupported conversation mode: {mode}")
+        """Compatibility adapter. Product execution always enters RunCoordinator."""
+        mode = str(mode).lower()
+        if mode not in {"assistant", "qa", "coding"}: raise ValueError(f"Unsupported conversation mode: {mode}")
+        track = kwargs.get("track") or {"assistant": {"track_id": "assistant:personal", "scope_id": "personal", "conversation_id": "personal"}, "qa": {"track_id": f"qa:{kwargs.get('topic_id') or self.qa.active_topic()}", "scope_id": "knowledge", "conversation_id": kwargs.get('topic_id') or self.qa.active_topic()}, "coding": {"track_id": kwargs.get("track_id", ""), "scope_id": kwargs.get("repository_id", ""), "conversation_id": kwargs.get("work_session_id", "")}}[mode]
+        request = RunRequest(f"compat_{uuid.uuid4().hex}", "local", str(kwargs.get("channel_id") or "compat"), str(track["conversation_id"]), mode, str(track["track_id"]), text, {**kwargs, "scope_id": track["scope_id"]})
+        return self.run_coordinator.execute(request).to_dict()
     @property
     def memory_admin_dependencies(self):
         return (

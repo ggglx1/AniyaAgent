@@ -265,34 +265,6 @@ class ConversationMemoryRepository:
         # v2 track facts are canonical. Legacy tables are retained only for migration reads.
         return self.append_track_message(role, content, channel=channel, timezone_name=timezone_name,
                                          reply_to_message_id=reply_to_message_id, metadata=metadata)
-        if role not in {"user", "assistant", "tool", "system"}:
-            raise ValueError(f"Unsupported factual message role: {role}")
-        now = datetime.now(ZoneInfo(timezone_name))
-        local_date, created_at = now.date().isoformat(), now.isoformat()
-        with self.lock, self.connect() as connection:
-            connection.execute(
-                "INSERT OR IGNORE INTO conversation_days(local_date, timezone_at_creation, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                (local_date, timezone_name, created_at, created_at),
-            )
-            seq = int(connection.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM conversation_messages").fetchone()[0])
-            message = ConversationMessage(
-                message_id=f"msg_{uuid.uuid4().hex[:16]}", day_date=local_date, seq=seq, role=role,
-                content=self.normalize(content), channel=channel, timezone_at_write=timezone_name,
-                created_at=created_at, reply_to_message_id=reply_to_message_id, metadata=metadata or {},
-            )
-            connection.execute(
-                """INSERT INTO conversation_messages(message_id, day_date, seq, role, content_json, channel,
-                   timezone_at_write, created_at, reply_to_message_id, metadata_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (message.message_id, message.day_date, message.seq, message.role,
-                 json.dumps(message.content, ensure_ascii=False), channel, timezone_name, created_at,
-                 reply_to_message_id, json.dumps(message.metadata, ensure_ascii=False)),
-            )
-            connection.execute("UPDATE conversation_days SET updated_at=? WHERE local_date=?", (created_at, local_date))
-        # Keep legacy callers and the new three-track archive in sync during migration.
-        self.append_track_message(role, content, channel=channel, timezone_name=timezone_name,
-                                  reply_to_message_id=reply_to_message_id, metadata=metadata)
-        return message
 
     def recent_messages(self, limit: int = 12) -> list[ConversationMessage]:
         with self.connect() as connection:
@@ -323,7 +295,7 @@ class ConversationMemoryRepository:
             sql = "SELECT * FROM conversation_track_messages WHERE mode='assistant' AND track_id='assistant:personal' AND day_date=?"
             if not include_redacted:
                 sql += " AND redacted_at=''"
-            rows = connection.execute(sql + " ORDER BY seq", (local_date,)).fetchall()
+            rows = connection.execute(sql + " ORDER BY sequence", (local_date,)).fetchall()
         return [self.to_track_message(row) for row in rows]
 
     def day(self, local_date: str) -> dict | None:

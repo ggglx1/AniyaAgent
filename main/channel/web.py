@@ -33,12 +33,12 @@ class WebChannel:
         with self._lock:
             self.request_sessions[request_id] = conversation_id; self.conversation_requests[conversation_id] = request_id
         metadata = {**dict(payload.get("metadata") or {}), **{key: track[key] for key in ("mode", "scope_id", "track_id", "repository_id", "work_session_id", "topic_id")}}
+        # This identifies a user submission across transport retries, not a Run.
+        metadata["client_message_id"] = str(metadata.get("client_message_id") or payload.get("client_message_id") or f"msg_{uuid.uuid4().hex}")
         attachment_ids = [str(item) for item in payload.get("attachment_ids", [])]
         if attachment_ids and self.application is not None:
-            attachment_text, attachment_images = self.application.attachments.context(attachment_ids)
-            if attachment_text:
-                text = f"{text}\n\n<attached_context>\n{attachment_text}\n</attached_context>"
             metadata["attachment_ids"] = attachment_ids
+            _, attachment_images = self.application.attachments.context(attachment_ids)
             metadata["attachment_images"] = attachment_images
         # Create the externally visible Run before returning the SSE URL. The coordinator
         # remains its lifecycle owner and will only reuse this accepted record.
@@ -107,7 +107,7 @@ class WebChannel:
                 for event in events:
                     last_event_id = max(last_event_id, int(event.get("event_id") or 0))
                     yield event
-                    if event.get("type") in {"completed", "failed", "cancelled", "timed_out"}:
+                    if event.get("type") in {"completed", "failed", "cancelled", "timed_out", "waiting_input", "waiting_confirmation"}:
                         return
                 continue
             state = self.run_events.state(request_id)

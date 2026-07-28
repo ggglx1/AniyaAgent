@@ -77,6 +77,12 @@ class BashTool(WorkspaceTool):
         dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
         if any(item in command for item in dangerous):
             return "Error: Dangerous command blocked"
+        # A shell launched in the repository can otherwise escape through `cd ..`,
+        # drive-qualified paths, or redirections. Keep this legacy shell tool inside
+        # the repository boundary until a dedicated process sandbox replaces it.
+        normalized = command.replace("\\", "/").lower()
+        if "../" in normalized or "cd .." in normalized or any(f"{drive}:" in normalized for drive in "abcdefghijklmnopqrstuvwxyz"):
+            return "Error: Command may escape the repository boundary"
 
         try:
             result = subprocess.run(

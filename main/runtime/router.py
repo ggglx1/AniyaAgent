@@ -16,12 +16,16 @@ class RunRouter:
         if request.mode == "coding": return RouteDecision("coding", "coding", "coding_task", 1.0, "explicit Coding mode", required_capabilities=["local_tools"])
         if request.metadata.get("proactive_event"): return RouteDecision("assistant", "proactive", "proactive_event", 1.0, "scheduler event")
         pending = self.pending_actions.get(request.track_id, request.user_id) if self.pending_actions else None
-        parsed = self.parser.parse(request.text, request.run_id, pending=pending)
+        source_message_id = str(request.metadata.get("client_message_id") or request.metadata.get("source_message_id") or "")
+        parsed = self.parser.parse(request.text, request.run_id, pending=pending, source_message_id=source_message_id)
         if pending:
             if self.rejects_pending(request.text):
                 self.pending_actions.resolve(request.track_id, owner_id=request.user_id, state="cancelled")
                 return RouteDecision("assistant", "direct_conversation", "conversation", 1.0, "user cancelled pending action")
             if parsed:
+                source_run_id = str(pending.get("source_run_id") or "")
+                if source_run_id:
+                    request.metadata["supersedes_waiting_run_id"] = source_run_id
                 request.metadata["structured_command"] = parsed.to_dict(); request.metadata["pending_action_id"] = pending["pending_action_id"]
                 confirmed = pending.get("confirmation_state") == "confirmation_required"
                 return RouteDecision("assistant", "structured_action", parsed.action, .98, "pending action continuation", requires_confirmation=False if confirmed else False)
@@ -32,7 +36,12 @@ class RunRouter:
             risk = parsed.action.endswith((".delete", ".forget"))
             return RouteDecision("assistant", "structured_action", parsed.action, .96, "structured command", requires_confirmation=risk, missing_fields=missing)
         if self.is_complex(request.text, request.metadata):
-            return RouteDecision("assistant", "deliberative_agent", "open_task", .68, "open multi-step task", required_capabilities=["local_tools"])
+            # Keep both read and potential action categories discoverable to the
+            # controlled two-phase executor without sending action schemas first.
+            required = ["filesystem_read", "filesystem_write", "shell_readonly"]
+            if request.metadata.get("allow_mcp"):
+                required.append("mcp")
+            return RouteDecision("assistant", "deliberative_agent", "open_task", .68, "open multi-step task", required_capabilities=required)
         return RouteDecision("assistant", "direct_conversation", "conversation", .86, "single-turn fast path")
 
     def rejects_pending(self, text: str) -> bool:
