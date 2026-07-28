@@ -157,6 +157,13 @@ class PersonalStateRepository:
                 raise FileNotFoundError(f"State record not found: {before.id}")
             self.insert_activity(connection, activity)
 
+    def delete(self, table: str, record, activity: dict) -> None:
+        with self.lock, self.connect() as connection:
+            cursor = connection.execute(f"DELETE FROM {table} WHERE id=? AND user_id=?", (record.id, record.user_id))
+            if cursor.rowcount != 1:
+                raise FileNotFoundError(f"State record not found: {record.id}")
+            self.insert_activity(connection, activity)
+
     def get(self, table: str, record_type, record_id: str, user_id: str):
         with self.connect() as connection:
             row = connection.execute(

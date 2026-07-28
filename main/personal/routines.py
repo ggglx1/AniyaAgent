@@ -81,6 +81,15 @@ class RoutineManager:
         self.sync_workspace()
         return after
 
+    def delete(self, routine_id: str, source: str = "user") -> PersonalRoutine:
+        routine = self.require(routine_id)
+        self.repository.delete(
+            "personal_routines", routine,
+            self.activity(routine_id, "deleted", routine, None, source),
+        )
+        self.sync_workspace()
+        return routine
+
     def record_run(self, routine_id: str, success: bool, result: str, run_at: datetime) -> PersonalRoutine:
         before = self.require(routine_id)
         after = replace(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from main.runtime.models import UnifiedRunResult
-from main.llm.usage import bind_request_context
+from main.llm.usage import bind_request_context, current_request_context
 
 
 class DirectConversationExecutor:
@@ -17,7 +17,7 @@ class DirectConversationExecutor:
         image_blocks = self.app.attachments.model_image_blocks(list(request.metadata.get("attachment_ids") or []), owner_id=request.user_id)
         content = [{"type": "text", "text": text}, *image_blocks] if image_blocks else text
         run_context = {"run_id": request.run_id, "executor": "direct_conversation", "route": decision.run_type, "context_blocks": built.metadata().get("blocks", [])}
-        with bind_request_context(run_context):
+        with bind_request_context({**current_request_context(), **run_context}):
             response = loop.llm_gateway.messages.create(task_type="main", model=loop.MODEL, max_tokens=1024, system=system, messages=[{"role":"user","content":content}], tools=[], cancellation_token=context["token"], run_context=run_context)
         context["token"].check()
         output = loop.extract_text(response.content).strip()

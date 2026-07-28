@@ -106,6 +106,13 @@ class PersonalStateManager:
             {"status": PersonalTaskStatus.DONE.value, "completion_note": note},
         )
 
+    def delete_task(self, task_id: str, source: str = "user") -> PersonalTask:
+        task = self.require_task(task_id)
+        self.repository.delete("personal_tasks", task, self.activity("task", task.id, "deleted", task, None, source))
+        self.sync_workspace()
+        self.mark_daily_memory_dirty()
+        return task
+
     def list_tasks(self, statuses: list[str] | None = None, limit: int = 100) -> list[PersonalTask]:
         if statuses:
             for status in statuses:
@@ -182,6 +189,13 @@ class PersonalStateManager:
 
     def complete_reminder(self, reminder_id: str) -> PersonalReminder:
         return self.update_reminder(reminder_id, {"status": ReminderStatus.COMPLETED.value})
+
+    def delete_reminder(self, reminder_id: str, source: str = "user") -> PersonalReminder:
+        reminder = self.require_reminder(reminder_id)
+        self.repository.delete("personal_reminders", reminder, self.activity("reminder", reminder.id, "deleted", reminder, None, source))
+        self.sync_workspace()
+        self.mark_daily_memory_dirty()
+        return reminder
 
     def list_reminders(self, statuses: list[str] | None = None, limit: int = 100) -> list[PersonalReminder]:
         if statuses:

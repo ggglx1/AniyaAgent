@@ -68,11 +68,17 @@ class PendingActionStore:
         return connection
 
     def get(self, track_id: str, owner_id: str = "local") -> dict | None:
-        now = self.now()
+        self.expire()
         with self.lock, self.connect() as connection:
-            connection.execute("UPDATE pending_actions SET state='expired',updated_at=? WHERE state='pending' AND expires_at<=?", (now, now))
             row = connection.execute("SELECT * FROM pending_actions WHERE owner_id=? AND track_id=? AND state='pending'", (owner_id, track_id)).fetchone()
         return self.decode(row) if row else None
+
+    def expire(self) -> list[dict]:
+        now = self.now()
+        with self.lock, self.connect() as connection:
+            rows = connection.execute("SELECT * FROM pending_actions WHERE state='pending' AND expires_at<=?", (now,)).fetchall()
+            connection.execute("UPDATE pending_actions SET state='expired',updated_at=? WHERE state='pending' AND expires_at<=?", (now, now))
+        return [self.decode(row) for row in rows]
 
     def create(self, track_id: str, command: dict, missing_fields: list[str], *, owner_id: str = "local", confirmation_state: str = "missing_input", ttl_minutes: int = 30, source_run_id: str = "", source_message_id: str = "", risk_level: str = "read_only") -> dict:
         now = self.now(); expires = (datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes)).isoformat().replace("+00:00", "Z")
@@ -81,6 +87,17 @@ class PendingActionStore:
             connection.execute("UPDATE pending_actions SET state='superseded',updated_at=? WHERE owner_id=? AND track_id=? AND state='pending'", (now, owner_id, track_id))
             connection.execute("INSERT INTO pending_actions(pending_action_id,owner_id,track_id,command_json,missing_fields_json,confirmation_state,state,expires_at,created_at,updated_at,source_run_id,source_message_id,risk_level) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (action_id, owner_id, track_id, json.dumps(command, ensure_ascii=False), json.dumps(missing_fields, ensure_ascii=False), confirmation_state, "pending", expires, now, now, source_run_id, source_message_id, risk_level))
         return self.get(track_id, owner_id) or {}
+
+    def update(self, pending_action_id: str, command: dict, missing_fields: list[str], *, confirmation_state: str = "missing_input", ttl_minutes: int = 30) -> dict | None:
+        """Keep one pending business action while the user fills fields in stages."""
+        now = self.now(); expires = (datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes)).isoformat().replace("+00:00", "Z")
+        with self.lock, self.connect() as connection:
+            connection.execute(
+                "UPDATE pending_actions SET command_json=?,missing_fields_json=?,confirmation_state=?,expires_at=?,updated_at=? WHERE pending_action_id=? AND state='pending'",
+                (json.dumps(command, ensure_ascii=False), json.dumps(missing_fields, ensure_ascii=False), confirmation_state, expires, now, pending_action_id),
+            )
+            row = connection.execute("SELECT * FROM pending_actions WHERE pending_action_id=?", (pending_action_id,)).fetchone()
+        return self.decode(row) if row else None
 
     def resolve(self, track_id: str, *, owner_id: str = "local", state: str = "completed") -> None:
         with self.lock, self.connect() as connection:

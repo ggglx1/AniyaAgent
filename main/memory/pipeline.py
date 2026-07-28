@@ -33,6 +33,8 @@ class StructuredMemoryPipeline:
         self.intent_guard = IntentGuard()
 
     def process(self, message_ids: list[str], user_id: str = "local", mode: str = "assistant", repository_id: str = "") -> list[str]:
+        if mode == "qa":
+            return []
         records = self.conversation.repository.track_messages_by_ids(message_ids, mode=mode)
         records = [item for item in records if not self.ledger.processed(item.message_id, self.extractor_version)]
         claimed = [item for item in records if self.ledger.claim(item.message_id, self.extractor_version)]

@@ -17,8 +17,10 @@ def current_request_context() -> dict:
 
 
 @contextmanager
-def bind_request_context(values: dict) -> Iterator[None]:
-    token = _request_context.set(dict(values or {}))
+def bind_request_context(values: dict, *, replace: bool = False) -> Iterator[None]:
+    """Bind nested request metadata without losing benchmark or trace attribution."""
+    value = dict(values or {}) if replace else {**current_request_context(), **dict(values or {})}
+    token = _request_context.set(value)
     try:
         yield
     finally:

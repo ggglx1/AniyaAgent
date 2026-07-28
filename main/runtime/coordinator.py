@@ -56,7 +56,14 @@ class RunCoordinator:
         try:
             token.check()
             emit_event("running", {"track_id": request.track_id})
+            for expired in self.pending_actions.expire():
+                source_run_id = str(expired.get("source_run_id") or "")
+                if source_run_id:
+                    self.run_events.finish(source_run_id, RunStatus.CANCELLED.value, error_code="pending_expired", error_message="Pending action expired before completion.")
             decision = self.router.route(request)
+            cancelled_waiting = str(request.metadata.get("cancel_waiting_run_id") or "")
+            if cancelled_waiting:
+                self.run_events.finish(cancelled_waiting, RunStatus.CANCELLED.value, error_code="pending_cancelled", error_message="User cancelled the pending action.")
             emit_event("run.routed", {"decision": decision.to_dict()})
             if decision.run_type == "waiting_input":
                 return self.finish(request, UnifiedRunResult(request.run_id, RunStatus.WAITING_INPUT.value, "Please provide the missing information to continue.", metadata={"missing_fields": decision.missing_fields, "pending_action": self.pending_actions.get(request.track_id, request.user_id)}), decision=decision)
@@ -71,6 +78,7 @@ class RunCoordinator:
                 "pending_actions": self.pending_actions,
                 "capabilities": self.capabilities.select(decision.required_capabilities, decision.run_type),
                 "built_context": self.context_builder.build(request, policy),
+                "permission_policy": request.metadata.get("permission_policy"),
             }
             emit_event("executor.started", {"executor": decision.run_type})
             result = executor.execute(request, context, decision)

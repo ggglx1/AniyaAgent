@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from main.actions import StructuredCommandParser
+from main.actions import ActionRegistry, StructuredCommandParser
 from .models import RouteDecision, RunRequest
 
 
@@ -21,6 +21,7 @@ class RunRouter:
         if pending:
             if self.rejects_pending(request.text):
                 self.pending_actions.resolve(request.track_id, owner_id=request.user_id, state="cancelled")
+                request.metadata["cancel_waiting_run_id"] = str(pending.get("source_run_id") or "")
                 return RouteDecision("assistant", "direct_conversation", "conversation", 1.0, "user cancelled pending action")
             if parsed:
                 source_run_id = str(pending.get("source_run_id") or "")
@@ -32,9 +33,11 @@ class RunRouter:
             return RouteDecision("assistant", "waiting_input", "pending_action", .9, "pending action needs missing fields", missing_fields=pending["missing_fields"])
         if parsed:
             request.metadata["structured_command"] = parsed.to_dict()
-            missing = ["scheduled_at"] if parsed.action == "reminder.create" and not parsed.arguments.get("scheduled_at") else []
-            risk = parsed.action.endswith((".delete", ".forget"))
-            return RouteDecision("assistant", "structured_action", parsed.action, .96, "structured command", requires_confirmation=risk, missing_fields=missing)
+            spec = ActionRegistry.get(parsed.action)
+            missing = ActionRegistry.missing(parsed.action, parsed.arguments)
+            return RouteDecision("assistant", "structured_action", parsed.action, .96, "structured command", requires_confirmation=bool(spec and spec.requires_confirmation), missing_fields=missing)
+        if request.metadata.get("force_deliberative"):
+            return RouteDecision("assistant", "deliberative_agent", "benchmark_open_task", 1.0, "benchmark forced deliberative route", required_capabilities=["filesystem_read", "filesystem_write", "shell_readonly"])
         if self.is_complex(request.text, request.metadata):
             # Keep both read and potential action categories discoverable to the
             # controlled two-phase executor without sending action schemas first.

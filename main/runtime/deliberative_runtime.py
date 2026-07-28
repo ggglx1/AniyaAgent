@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from main.agent.conversation_integrity import ConversationIntegrityValidator
-from main.llm.usage import bind_request_context
+from main.llm.usage import bind_request_context, current_request_context
 from main.runtime.models import RunStatus, UnifiedRunResult
 from main.tools.tool_result import ToolResult
 
@@ -32,15 +32,22 @@ class McpToolProxy:
 class CapabilityToolSlice:
     """A per-run view of local tools; the global registry is never exposed directly."""
 
-    def __init__(self, tools, capabilities, *, allow_side_effects: bool = False, mcp_gateway=None, token=None):
+    def __init__(self, tools, capabilities, *, allow_side_effects: bool = False, category: str = "", mcp_gateway=None, token=None):
+        def belongs(item) -> bool:
+            if not category:
+                return allow_side_effects or not item.side_effect
+            if item.provider == "mcp":
+                return category == "mcp_write" and item.side_effect
+            return {"filesystem_write": item.name in {"write_file", "edit_file"}, "shell_readonly": item.name == "bash"}.get(category, False)
         allowed = {
             item.name for item in capabilities
-            if item.provider == "local" and (allow_side_effects or not item.side_effect)
+            if item.provider == "local" and belongs(item)
         }
         self.registry = {name: tool for name, tool in getattr(tools, "registry", {}).items() if name in allowed}
         for capability in capabilities:
-            if capability.provider == "mcp" and (allow_side_effects or not capability.side_effect):
-                self.registry[capability.id] = McpToolProxy(mcp_gateway, capability, token)
+            if capability.provider == "mcp" and belongs(capability):
+                proxy = McpToolProxy(mcp_gateway, capability, token)
+                self.registry[proxy.name] = proxy
         self.validator = getattr(tools, "validator", None)
 
     @property
@@ -97,7 +104,6 @@ class DeliberativeRuntimeAdapter:
         built = context["built_context"]
         capabilities = context["capabilities"]
         read_tools = CapabilityToolSlice(runtime.tools, capabilities, mcp_gateway=self.app.mcp, token=context["token"])
-        all_tools = CapabilityToolSlice(runtime.tools, capabilities, allow_side_effects=True, mcp_gateway=self.app.mcp, token=context["token"])
         system = (
             "You are Aniya's bounded task agent. Work only with the supplied capabilities. "
             "Start with read-only inspection. Explain before any destructive change, and finish with a concise result."
@@ -108,11 +114,14 @@ class DeliberativeRuntimeAdapter:
         messages = [{"role": "user", "content": content}]
         used = []
         escalated = False
+        upgrade_category = ""
+        upgrade_metadata = {"initial_tool_count": len(read_tools.registry), "initial_tool_schema_tokens": sum(len(str(item)) // 4 for item in read_tools.definitions)}
         compactor = ToolResultCompactor(runtime.WORKDIR)
         integrity = ConversationIntegrityValidator()
         max_turns = 8
         run_context = {"run_id": request.run_id, "executor": "deliberative_agent", "route": "deliberative_agent", "context_blocks": built.metadata().get("blocks", [])}
-        with bind_request_context(run_context):
+        # Keep benchmark/request attribution while adding the executor-specific context.
+        with bind_request_context({**current_request_context(), **run_context}):
             for turn in range(max_turns):
                 context["token"].check()
                 report = integrity.validate(messages)
@@ -121,7 +130,12 @@ class DeliberativeRuntimeAdapter:
                     if not repaired_report.valid:
                         return UnifiedRunResult(request.run_id, RunStatus.FAILED.value, error="Invalid tool transaction history.", error_code="tool_transaction_integrity")
                     messages[:] = repaired
-                toolset = all_tools if escalated else read_tools
+                if escalated:
+                    toolset = CapabilityToolSlice(runtime.tools, capabilities, category=upgrade_category, mcp_gateway=self.app.mcp, token=context["token"])
+                    # Upgrading grants one action category in addition to the original inspection tools.
+                    toolset.registry = {**read_tools.registry, **toolset.registry}
+                else:
+                    toolset = read_tools
                 definitions = list(toolset.definitions)
                 if not escalated:
                     definitions.append({"name": "request_capability_upgrade", "description": "Request one action-phase capability category after read-only inspection.", "input_schema": {"type": "object", "properties": {"category": {"type": "string", "enum": ["filesystem_write", "shell_readonly", "mcp_write"]}, "reason": {"type": "string"}, "target": {"type": "string"}}, "required": ["category", "reason", "target"]}})
@@ -135,7 +149,7 @@ class DeliberativeRuntimeAdapter:
                 if getattr(response, "stop_reason", "") != "tool_use":
                     output = runtime.extract_text(blocks).strip()
                     if output:
-                        return UnifiedRunResult(request.run_id, RunStatus.COMPLETED.value, output, metadata={"executor": "deliberative", "memory_sources": built.source_ids, "tool_calls": used, "capability_escalated": escalated})
+                        return UnifiedRunResult(request.run_id, RunStatus.COMPLETED.value, output, metadata={"executor": "deliberative", "memory_sources": built.source_ids, "tool_calls": used, "capability_escalated": escalated, **upgrade_metadata})
                     return UnifiedRunResult(request.run_id, RunStatus.FAILED.value, error="Model returned an empty response.", error_code="empty_model_output", metadata={"executor": "deliberative"})
                 results = []
                 for block in blocks:
@@ -148,13 +162,22 @@ class DeliberativeRuntimeAdapter:
                         if category not in {"filesystem_write", "shell_readonly", "mcp_write"}:
                             results.append({"type": "tool_result", "tool_use_id": block.id, "content": "Invalid capability category."})
                             continue
+                        upgraded = CapabilityToolSlice(runtime.tools, capabilities, category=category, mcp_gateway=self.app.mcp, token=context["token"])
+                        if not upgraded.registry:
+                            results.append({"type": "tool_result", "tool_use_id": block.id, "content": f"Capability category {category} is unavailable for this run."})
+                            continue
                         escalated = True
+                        upgrade_category = category
+                        upgrade_metadata.update({"upgrade_category": category, "upgraded_action_tool_count": len(upgraded.registry), "upgraded_tool_count": len(read_tools.registry) + len(upgraded.registry), "upgraded_tool_schema_tokens": sum(len(str(item)) // 4 for item in [*read_tools.definitions, *upgraded.definitions])})
                         results.append({"type": "tool_result", "tool_use_id": block.id, "content": f"Capability upgrade granted for {category}. Use only the newly exposed minimum tools."})
                         continue
                     context["emit"]("tool.call.started", {"tool": {"id": block.id, "name": name, "input": getattr(block, "input", {})}})
                     def permission(block_to_check):
                         tool = toolset.registry.get(getattr(block_to_check, "name", ""))
-                        if tool is not None and tool in all_tools.registry.values() and tool not in read_tools.registry.values():
+                        if tool is not None and tool not in read_tools.registry.values():
+                            policy = context.get("permission_policy")
+                            if policy is not None:
+                                return None if policy(upgrade_category, getattr(block_to_check, "name", ""), getattr(block_to_check, "input", {}) or {}) else "Benchmark permission policy denied this side-effect tool."
                             return None if runtime.permissions.ask_user(block_to_check, "Deliberative action-phase tool") else "User confirmation is required for this side-effect tool."
                         return runtime.hooks.trigger("PreToolUse", block_to_check)
                     output = toolset.execute(block, permission)
@@ -163,4 +186,4 @@ class DeliberativeRuntimeAdapter:
                     context["emit"]("tool.call.completed", {"tool": {"id": block.id, "name": name}, "result": {"preview": str(output)[:1000], "truncated": len(str(output)) > 1000}})
                     results.append({"type": "tool_result", "tool_use_id": block.id, "content": output})
                 messages.append({"role": "user", "content": results})
-        return UnifiedRunResult(request.run_id, RunStatus.FAILED.value, error="Deliberative turn budget reached before a final answer.", error_code="react_turn_budget", metadata={"executor": "deliberative", "tool_calls": used})
+        return UnifiedRunResult(request.run_id, RunStatus.FAILED.value, error="Deliberative turn budget reached before a final answer.", error_code="react_turn_budget", metadata={"executor": "deliberative", "tool_calls": used, **upgrade_metadata})
