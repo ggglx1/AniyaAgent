@@ -2,15 +2,24 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-A private AI assistant that runs on your own computer. It can chat, remember what matters, manage tasks and schedules, and send reminders to WeChat. Your data and tools stay on your device; AniyaAgent connects the pieces.
+A local-first personal AI agent for turning conversation into useful work without handing your workspace to a hosted assistant.
 
-## What It Does
+AniyaAgent runs on your own computer and connects the parts of everyday work that usually live in separate places: conversations, tasks, files, schedules, reminders, coding work, and local tools. It can reason over a request, propose or execute an action, retain useful context, and keep long-running work moving while you stay in control.
 
-- **Gets things done**: understands natural language, uses local tools, and works with files, commands, and tasks.
-- **Keeps context**: separates factual memory, daily memory, and long-term memory so conversations stay useful.
-- **Organizes daily life**: handles tasks, routines, scheduled reminders, and background work.
-- **Stays within reach**: use it from a desktop or mobile browser; optionally access it remotely through a Cloudflare Worker relay.
-- **Notifies without hijacking chat**: WeChat is a notification channel, not a conversation entry point.
+The control plane stays local by default: credentials, attachments, memory, queued work, and tool execution remain on your device. Remote access is optional and protected rather than assumed.
+
+## Core Capabilities
+
+- **Conversation to action**: turns natural-language requests into explicit actions across local files, commands, tasks, and connected tools. Actions can be reviewed, queued, resumed, or cancelled instead of disappearing into a chat transcript.
+- **Personal operating system**: keeps tasks, routines, schedules, reminders, background jobs, and follow-ups in one durable runtime.
+- **Memory with boundaries**: separates factual, daily, and long-term memory so the agent keeps useful context without treating every message as permanent personal data.
+- **Coding companion**: routes coding work through dedicated executors, budgets, artifacts, and project-aware context alongside normal assistant work.
+- **Local and mobile access**: use the Web Client from a desktop or phone on your LAN, or add a Cloudflare Worker relay when remote access is genuinely needed.
+- **Notifications, not another inbox**: sends reminders through WeChat without turning WeChat into the primary conversation channel.
+
+## How It Differs
+
+AniyaAgent is not a thin chat wrapper around an LLM. It is a local runtime that gives requests an execution path: context is assembled deliberately, work is routed to the right executor, actions and events are tracked, and long-running tasks can continue outside a single response. The result is an assistant that is useful for repeated personal workflows, not just one-off answers.
 
 ## Architecture
 
