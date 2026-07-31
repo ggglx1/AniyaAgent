@@ -113,6 +113,7 @@ class DeliberativeRuntimeAdapter:
         content = [{"type": "text", "text": user_content}, *images] if images else user_content
         messages = [{"role": "user", "content": content}]
         used = []
+        tool_results = []
         escalated = False
         upgrade_category = ""
         upgrade_metadata = {"initial_tool_count": len(read_tools.registry), "initial_tool_schema_tokens": sum(len(str(item)) // 4 for item in read_tools.definitions)}
@@ -149,8 +150,8 @@ class DeliberativeRuntimeAdapter:
                 if getattr(response, "stop_reason", "") != "tool_use":
                     output = runtime.extract_text(blocks).strip()
                     if output:
-                        return UnifiedRunResult(request.run_id, RunStatus.COMPLETED.value, output, metadata={"executor": "deliberative", "memory_sources": built.source_ids, "tool_calls": used, "capability_escalated": escalated, **upgrade_metadata})
-                    return UnifiedRunResult(request.run_id, RunStatus.FAILED.value, error="Model returned an empty response.", error_code="empty_model_output", metadata={"executor": "deliberative"})
+                        return UnifiedRunResult(request.run_id, RunStatus.COMPLETED.value, output, metadata={"executor": "deliberative", "memory_sources": built.source_ids, "tool_calls": used, "tool_results": tool_results, "capability_escalated": escalated, **upgrade_metadata})
+                    return UnifiedRunResult(request.run_id, RunStatus.FAILED.value, error="Model returned an empty response.", error_code="empty_model_output", metadata={"executor": "deliberative", "tool_results": tool_results})
                 results = []
                 for block in blocks:
                     if getattr(block, "type", "") != "tool_use":
@@ -180,10 +181,12 @@ class DeliberativeRuntimeAdapter:
                                 return None if policy(upgrade_category, getattr(block_to_check, "name", ""), getattr(block_to_check, "input", {}) or {}) else "Benchmark permission policy denied this side-effect tool."
                             return None if runtime.permissions.ask_user(block_to_check, "Deliberative action-phase tool") else "User confirmation is required for this side-effect tool."
                         return runtime.hooks.trigger("PreToolUse", block_to_check)
-                    output = toolset.execute(block, permission)
-                    output = compactor.compact(output, str(getattr(block, "id", "")))
+                    raw_output = toolset.execute(block, permission)
+                    succeeded = '"ok": false' not in str(raw_output)
+                    output = compactor.compact(raw_output, str(getattr(block, "id", "")))
                     used.append(name)
+                    tool_results.append({"name": name, "ok": succeeded})
                     context["emit"]("tool.call.completed", {"tool": {"id": block.id, "name": name}, "result": {"preview": str(output)[:1000], "truncated": len(str(output)) > 1000}})
                     results.append({"type": "tool_result", "tool_use_id": block.id, "content": output})
                 messages.append({"role": "user", "content": results})
-        return UnifiedRunResult(request.run_id, RunStatus.FAILED.value, error="Deliberative turn budget reached before a final answer.", error_code="react_turn_budget", metadata={"executor": "deliberative", "tool_calls": used, **upgrade_metadata})
+        return UnifiedRunResult(request.run_id, RunStatus.FAILED.value, error="Deliberative turn budget reached before a final answer.", error_code="react_turn_budget", metadata={"executor": "deliberative", "tool_calls": used, "tool_results": tool_results, **upgrade_metadata})

@@ -36,6 +36,7 @@ class CodingAssistantService:
         messages = [{"role": item.role, "content": item.content} for item in history if item.role in {"user", "assistant"}]
         messages.append({"role": "user", "content": text})
         tool_facts = []
+        tool_results = []
         budget = CodingBudget()
         artifacts = CodingArtifactStore(self.workdir)
         compactor = CodingTurnCompactor()
@@ -60,13 +61,15 @@ class CodingAssistantService:
                 if not budget.record_tool_signature(signature):
                     output = "[Stopped repeated identical tool invocation; summarize and ask for a new direction.]"
                     results.append({"type": "tool_result", "tool_use_id": block.id, "content": output})
+                    tool_results.append({"name": block.name, "ok": False, "error_type": "repeated_tool_signature"})
                     continue
                 output = tools.execute(block)
+                succeeded = '"ok": false' not in str(output)
                 if not budget.record_tool_result(output):
                     artifact = artifacts.save(output)
                     output = f"[Tool output budget reached. Full result saved at {artifact['path']} (sha256={artifact['sha256']}).]"
                 result = {"type": "tool_result", "tool_use_id": block.id, "content": output}
-                results.append(result); tool_facts.append(result)
+                results.append(result); tool_facts.append(result); tool_results.append({"name": block.name, "ok": succeeded})
             messages.append({"role": "user", "content": results})
         answer = "\n".join(getattr(block, "text", "") for message in messages if message.get("role") == "assistant" for block in (message.get("content") or []) if getattr(block, "type", "") == "text").strip()
         if not answer and not budget.allow_request(messages): answer = "Coding budget reached before a final answer. The work session is saved and can be continued."
@@ -74,4 +77,4 @@ class CodingAssistantService:
             self.repository.append_track_message("tool", result, mode="coding", scope_id=repository_id, track_id=track_id, repository_id=repository_id, work_session_id=session_id)
         exhausted = not finished and not budget.allow_request(messages)
         status = "completed" if finished and answer else ("budget_exhausted" if exhausted else "incomplete")
-        return {"repository_id": repository_id, "work_session_id": session_id, "track_id": track_id, "text": answer, "budget": budget.__dict__, "checkpoint": {"track_id": track_id, "resume_with": session_id}, "status": status}
+        return {"repository_id": repository_id, "work_session_id": session_id, "track_id": track_id, "text": answer, "budget": budget.__dict__, "tool_results": tool_results, "checkpoint": {"track_id": track_id, "resume_with": session_id}, "status": status}

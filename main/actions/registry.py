@@ -10,6 +10,20 @@ class ActionSpec:
     optional_fields: tuple[str, ...] = ()
     risk_level: str = "read_only"
     requires_confirmation: bool = False
+    minimum_confidence: str = "high"
+    allow_fast_execute: bool = False
+
+    @property
+    def execution_policy(self) -> str:
+        if self.requires_confirmation:
+            return "irreversible_write"
+        if self.risk_level == "read_only":
+            return "read_only"
+        return "reversible_write"
+
+    @property
+    def preview_required(self) -> bool:
+        return self.execution_policy != "read_only" and not self.allow_fast_execute
 
 
 class ActionRegistry:
@@ -55,3 +69,18 @@ class ActionRegistry:
         if spec is None:
             return ["unsupported_action"]
         return [field for field in spec.required_fields if not str(arguments.get(field) or "").strip()]
+
+    @classmethod
+    def validate_arguments(cls, action: str, arguments: dict) -> str:
+        spec = cls.get(action)
+        if spec is None:
+            return "unsupported_action"
+        allowed = set(spec.required_fields) | set(spec.optional_fields)
+        unknown = sorted(set(arguments) - allowed)
+        if unknown:
+            return f"unsupported_arguments:{','.join(unknown)}"
+        if "priority" in arguments and (not isinstance(arguments["priority"], int) or isinstance(arguments["priority"], bool)):
+            return "priority_must_be_integer"
+        if "routine_type" in arguments and arguments["routine_type"] not in {"morning_plan", "evening_review", "weekly_review"}:
+            return "invalid_routine_type"
+        return ""

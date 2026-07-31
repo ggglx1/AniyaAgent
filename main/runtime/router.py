@@ -1,41 +1,44 @@
 from __future__ import annotations
 
-from main.actions import ActionRegistry, StructuredCommandParser
+from main.actions.intent import IntentResolutionService
 from .models import RouteDecision, RunRequest
 
 
 class RunRouter:
     """Ordered routing: explicit mode, pending action, deterministic action, fast path, then open task."""
 
-    def __init__(self, pending_actions=None):
+    def __init__(self, application, pending_actions=None):
         self.pending_actions = pending_actions
-        self.parser = StructuredCommandParser()
+        self.intent = IntentResolutionService(application)
 
-    def route(self, request: RunRequest) -> RouteDecision:
+    def route(self, request: RunRequest, cancellation_token=None) -> RouteDecision:
         if request.mode == "qa": return RouteDecision("qa", "qa", "knowledge_question", 1.0, "explicit QA mode")
         if request.mode == "coding": return RouteDecision("coding", "coding", "coding_task", 1.0, "explicit Coding mode", required_capabilities=["local_tools"])
         if request.metadata.get("proactive_event"): return RouteDecision("assistant", "proactive", "proactive_event", 1.0, "scheduler event")
         pending = self.pending_actions.get(request.track_id, request.user_id) if self.pending_actions else None
-        source_message_id = str(request.metadata.get("client_message_id") or request.metadata.get("source_message_id") or "")
-        parsed = self.parser.parse(request.text, request.run_id, pending=pending, source_message_id=source_message_id)
         if pending:
             if self.rejects_pending(request.text):
                 self.pending_actions.resolve(request.track_id, owner_id=request.user_id, state="cancelled")
                 request.metadata["cancel_waiting_run_id"] = str(pending.get("source_run_id") or "")
                 return RouteDecision("assistant", "direct_conversation", "conversation", 1.0, "user cancelled pending action")
-            if parsed:
+        resolution = self.intent.resolve(request, pending, cancellation_token=cancellation_token)
+        request.metadata["intent_resolution"] = resolution.to_dict()
+        if pending:
+            if resolution.status in {"ready", "preview_required", "confirmation_required", "ambiguous"} and resolution.validated_action:
                 source_run_id = str(pending.get("source_run_id") or "")
                 if source_run_id:
                     request.metadata["supersedes_waiting_run_id"] = source_run_id
-                request.metadata["structured_command"] = parsed.to_dict(); request.metadata["pending_action_id"] = pending["pending_action_id"]
-                confirmed = pending.get("confirmation_state") == "confirmation_required"
-                return RouteDecision("assistant", "structured_action", parsed.action, .98, "pending action continuation", requires_confirmation=False if confirmed else False)
+                request.metadata["structured_command"] = resolution.validated_action.to_dict(); request.metadata["pending_action_id"] = pending["pending_action_id"]; request.metadata["pending_confirmation_state"] = pending.get("confirmation_state", "")
+                return RouteDecision("assistant", "structured_action", resolution.validated_action.action, .98, "pending action continuation")
             return RouteDecision("assistant", "waiting_input", "pending_action", .9, "pending action needs missing fields", missing_fields=pending["missing_fields"])
-        if parsed:
-            request.metadata["structured_command"] = parsed.to_dict()
-            spec = ActionRegistry.get(parsed.action)
-            missing = ActionRegistry.missing(parsed.action, parsed.arguments)
-            return RouteDecision("assistant", "structured_action", parsed.action, .96, "structured command", requires_confirmation=bool(spec and spec.requires_confirmation), missing_fields=missing)
+        if resolution.status in {"ready", "missing_fields", "preview_required", "confirmation_required"} and resolution.validated_action:
+            request.metadata["structured_command"] = resolution.validated_action.to_dict()
+            return RouteDecision("assistant", "structured_action", resolution.validated_action.action, .96, f"intent resolution: {resolution.status}", missing_fields=resolution.missing_fields)
+        if resolution.status == "ambiguous" and resolution.validated_action and resolution.missing_fields:
+            request.metadata["structured_command"] = resolution.validated_action.to_dict()
+            return RouteDecision("assistant", "structured_action", resolution.validated_action.action, .95, resolution.policy_reason, missing_fields=resolution.missing_fields)
+        if resolution.status == "ambiguous":
+            return RouteDecision("assistant", "waiting_input", "ambiguous_action", .95, resolution.policy_reason, missing_fields=resolution.missing_fields)
         if request.metadata.get("force_deliberative"):
             return RouteDecision("assistant", "deliberative_agent", "benchmark_open_task", 1.0, "benchmark forced deliberative route", required_capabilities=["filesystem_read", "filesystem_write", "shell_readonly"])
         if self.is_complex(request.text, request.metadata):

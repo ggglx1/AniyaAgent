@@ -26,7 +26,7 @@ class RunCoordinator:
         self.context_builder = ContextBuilder(application)
         self.capabilities = CapabilityCatalog(application)
         self.outbox = DomainEventOutbox(application.runtime.WORKDIR)
-        self.router = RunRouter(self.pending_actions)
+        self.router = RunRouter(application, self.pending_actions)
         self.executors = {
             "direct_conversation": DirectConversationExecutor(application),
             "structured_action": StructuredActionExecutor(application),
@@ -60,7 +60,7 @@ class RunCoordinator:
                 source_run_id = str(expired.get("source_run_id") or "")
                 if source_run_id:
                     self.run_events.finish(source_run_id, RunStatus.CANCELLED.value, error_code="pending_expired", error_message="Pending action expired before completion.")
-            decision = self.router.route(request)
+            decision = self.router.route(request, token)
             cancelled_waiting = str(request.metadata.get("cancel_waiting_run_id") or "")
             if cancelled_waiting:
                 self.run_events.finish(cancelled_waiting, RunStatus.CANCELLED.value, error_code="pending_cancelled", error_message="User cancelled the pending action.")
@@ -105,7 +105,11 @@ class RunCoordinator:
         if status == "pending_input":
             status = RunStatus.WAITING_INPUT.value
         result.status = status
-        metadata = {**result.metadata, "route": decision.to_dict() if decision else result.metadata.get("route", {})}
+        metadata = {
+            **result.metadata,
+            "route": decision.to_dict() if decision else result.metadata.get("route", {}),
+            "intent_resolution": request.metadata.get("intent_resolution", result.metadata.get("intent_resolution", {})),
+        }
         if context:
             metadata["context"] = context["built_context"].metadata()
             metadata["capabilities"] = [item.id for item in context["capabilities"]]

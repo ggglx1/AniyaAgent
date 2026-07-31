@@ -43,11 +43,15 @@ class StructuredCommandParser:
         if pending is not None:
             previous = dict(pending["command"])
             arguments = dict(previous.get("arguments") or {})
-            if pending.get("confirmation_state") == "confirmation_required" and text.casefold() in {"\u786e\u8ba4", "\u786e\u8ba4\u6267\u884c", "confirm", "yes"}:
-                return self.command(run_id, previous["action"], arguments, text, previous.get("source_message_id", ""), previous.get("idempotency_key", ""))
+            if pending.get("confirmation_state") in {"confirmation_required", "preview_required"} and text.casefold() in {"\u786e\u8ba4", "\u786e\u8ba4\u6267\u884c", "confirm", "yes"}:
+                command = self.command(run_id, previous["action"], arguments, text, previous.get("source_message_id", ""), previous.get("idempotency_key", ""))
+                command.result = dict(previous.get("result") or {})
+                return command
             arguments.update(self.continuation_arguments(text, pending.get("missing_fields", []), timezone_name))
             if any(str(arguments.get(field) or "").strip() for field in pending.get("missing_fields", [])):
-                return self.command(run_id, previous["action"], arguments, text, previous.get("source_message_id", ""), previous.get("idempotency_key", ""))
+                command = self.command(run_id, previous["action"], arguments, text, previous.get("source_message_id", ""), previous.get("idempotency_key", ""))
+                command.result = dict(previous.get("result") or {})
+                return command
             return None
         if any(marker in text for marker in self.NEGATED):
             return None
