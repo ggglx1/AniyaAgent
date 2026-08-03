@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import uuid
+from datetime import date
 from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, Depends, FastAPI, File, Query, Request, UploadFile
@@ -12,6 +14,9 @@ from fastapi.responses import StreamingResponse
 from .dependencies import require_auth, services
 from .errors import install_error_handlers
 from .schemas import MemoryActionRequest, MessageRequest, PermissionRequest, ProviderRequest, RedactRequest, TrackRequest, WeixinBindingRequest
+from .schemas import AgendaActionRequest
+from main.actions import ActionCommandService, StructuredCommand
+from main.personal import AgendaQueryService
 
 
 def ok(**payload): return {"ok": True, **payload}
@@ -30,7 +35,7 @@ def create_api(application, bridge, auth_token: str = "") -> FastAPI:
 
     app = FastAPI(title="AniyaAgent API", version="1.0.0", lifespan=lifespan)
     app.state.auth_token = auth_token
-    app.state.services = {"application": application, "bridge": bridge, "memory": bridge.memory_admin, "llm": bridge.llm_control, "attachments": application.attachments, "mcp": application.mcp}
+    app.state.services = {"application": application, "bridge": bridge, "memory": bridge.memory_admin, "llm": bridge.llm_control, "attachments": application.attachments, "mcp": application.mcp, "agenda": AgendaQueryService(application.runtime.personal_state, application.runtime.profile_store), "action_commands": ActionCommandService(application)}
     origins = [value.strip() for value in os.getenv("ANIYAAGENT_CORS_ORIGINS", "http://localhost,http://127.0.0.1").split(",") if value.strip()]
     app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=False, allow_methods=["GET", "POST", "OPTIONS"], allow_headers=["Authorization", "Content-Type", "X-AniyaAgent-Token"])
     install_error_handlers(app)
@@ -119,6 +124,35 @@ def create_api(application, bridge, auth_token: str = "") -> FastAPI:
     @plans.post("/action")
     async def plan_action(payload: dict, data=Depends(services)): return ok(**data["memory"].plan_action(payload))
 
+    agenda = APIRouter(prefix="/agenda", dependencies=auth)
+    @agenda.get("")
+    async def get_agenda(date_value: str = Query("", alias="date"), data=Depends(services)):
+        if date_value:
+            date.fromisoformat(date_value)
+        return ok(agenda=data["agenda"].view(date_value))
+    @agenda.get("/dates")
+    async def agenda_dates(from_date: str = Query(..., alias="from"), to_date: str = Query(..., alias="to"), data=Depends(services)):
+        return ok(dates=data["agenda"].dates(from_date, to_date))
+    @agenda.get("/receipts")
+    async def agenda_receipts(date_value: str = Query("", alias="date"), limit: int = Query(100, ge=1, le=500), data=Depends(services)):
+        if date_value:
+            date.fromisoformat(date_value)
+            agenda_view = data["agenda"].view(date_value)
+            return ok(receipts=agenda_view["recent_receipts"][:limit])
+        repository = data["application"].runtime.personal_state.repository
+        return ok(receipts=repository.list_receipts(data["application"].runtime.personal_state.user_id, limit=limit))
+    @agenda.post("/actions")
+    async def agenda_action(payload: AgendaActionRequest, data=Depends(services)):
+        command = StructuredCommand(command_id=f"webcmd_{uuid.uuid4().hex[:16]}", run_id="web", action=payload.action, arguments=payload.arguments, idempotency_key=payload.client_action_id)
+        result = data["action_commands"].execute(command, source="web", channel_id="web")
+        return ok(**result)
+    @agenda.post("/actions/{receipt_id}/confirm")
+    async def confirm_agenda_action(receipt_id: str, data=Depends(services)):
+        return ok(**data["action_commands"].confirm(receipt_id, source="web", channel_id="web"))
+    @agenda.post("/actions/{receipt_id}/cancel")
+    async def cancel_agenda_action(receipt_id: str, data=Depends(services)):
+        return ok(**data["action_commands"].cancel(receipt_id))
+
     notifications = APIRouter(dependencies=auth)
     @notifications.get("/notifications")
     async def list_notifications(limit: int = Query(100, ge=1, le=500), data=Depends(services)): return ok(notifications=data["memory"].notification_status(limit))
@@ -182,5 +216,5 @@ def create_api(application, bridge, auth_token: str = "") -> FastAPI:
         if not data["bridge"].cancel_run(run_id): from fastapi import HTTPException; raise HTTPException(status_code=409, detail={"error":"run_not_cancellable","message":"Run is already terminal or unavailable."})
         return ok(cancelled=True)
 
-    for router in (system, conversation, message_router, attachments, providers, memory, plans, notifications, weixin, mcp, stream, runs): app.include_router(router)
+    for router in (system, conversation, message_router, attachments, providers, memory, plans, agenda, notifications, weixin, mcp, stream, runs): app.include_router(router)
     return app

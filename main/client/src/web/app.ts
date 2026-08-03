@@ -37,6 +37,22 @@ type RunSnapshot = {
   finalContent?: string;
   errorCode?: string;
   errorMessage?: string;
+  actionReceipt?: Record<string, unknown>;
+  action_receipt?: Record<string, unknown>;
+};
+
+type AgendaView = {
+  date: string;
+  timezone: string;
+  is_today: boolean;
+  summary: Record<string, number>;
+  focus_tasks: Array<Record<string, unknown>>;
+  scheduled_reminders: Array<Record<string, unknown>>;
+  delivered_reminders: Array<Record<string, unknown>>;
+  completed_items: Array<Record<string, unknown>>;
+  overdue_tasks: Array<Record<string, unknown>>;
+  unscheduled_tasks: Array<Record<string, unknown>>;
+  recent_receipts: Array<Record<string, unknown>>;
 };
 
 type WsMessage =
@@ -123,6 +139,7 @@ let tracks = new Map<ConversationMode, TrackDescriptor>();
 let records: ConversationMessage[] = [];
 let hasMore = false;
 let drawerView: DrawerView = 'plans';
+let selectedAgendaDate = new Date().toISOString().slice(0, 10);
 let transientCounter = 0;
 const activeRunStorageKey = 'aniya_active_run';
 let activeRun: RunSnapshot | null = loadStoredRun();
@@ -191,7 +208,10 @@ async function loadHistory(older: boolean): Promise<void> {
   if (before) query.set('before_sequence', String(before));
   const previousHeight = messagesEl.scrollHeight;
   const payload = await api<{ track: TrackDescriptor; messages: ConversationMessage[]; has_more: boolean }>(`/conversation/history?${query}`);
-  currentTrack = payload.track;
+  // History responses intentionally omit transport capability fields.
+  // Preserve the complete track negotiated by /conversation/state for every mode.
+  currentTrack = { ...(tracks.get(currentMode) || defaultTrack(currentMode)), ...payload.track };
+  tracks.set(currentMode, currentTrack);
   tracks.set(currentMode, currentTrack);
   records = older ? mergeMessages(payload.messages, records) : payload.messages;
   hasMore = payload.has_more;
@@ -349,7 +369,10 @@ function handleWsMessage(message: WsMessage): void {
 }
 
 function handleRunSnapshot(run: RunSnapshot): void {
+  if ((run.actionReceipt || run.action_receipt) && drawerView === 'plans' && !drawer.classList.contains('hidden')) void loadDrawer();
   if (['waiting_input', 'waiting_confirmation'].includes(run.status)) {
+    const receipt = run.actionReceipt || run.action_receipt;
+    if (run.status === 'waiting_confirmation' && receipt) showActionConfirmation(receipt);
     // A pending action is server-side durable. The browser must become editable.
     storeRun(null); busy = false; setStatus(run.status, 'connected'); clearActivity(300);
     updateComposerAvailability(); return;
@@ -566,7 +589,7 @@ async function loadDrawer(): Promise<void> {
   newPlanButton.classList.toggle('hidden', drawerView !== 'plans');
   exportButton.classList.toggle('hidden', drawerView === 'binding');
   try {
-    if (drawerView === 'plans') await renderPlans();
+    if (drawerView === 'plans') await renderAgenda();
     else if (drawerView === 'notifications') await renderNotifications();
     else if (drawerView === 'daily') await renderDaily();
     else if (drawerView === 'memory') await renderLongTermMemory();
@@ -599,6 +622,79 @@ async function renderPlans(): Promise<void> {
     actions.append(actionButton(item.enabled ? '暂停' : '启用', () => void planAction('routine', 'toggle', String(item.id))));
   });
   if (!payload.tasks?.length && !payload.reminders?.length && !payload.routines?.length) drawerContent.appendChild(emptyBlock('还没有计划'));
+}
+
+async function renderAgenda(): Promise<void> {
+  const payload = await api<{ agenda: AgendaView }>(`/agenda?date=${encodeURIComponent(selectedAgendaDate)}`);
+  const agenda = payload.agenda;
+  selectedAgendaDate = agenda.date;
+  drawerSummary.textContent = agenda.is_today ? 'Today' : formatDay(agenda.date);
+  drawerContent.replaceChildren(agendaNavigation(agenda));
+  appendPlanSection('Focus', agenda.focus_tasks, (item) => String(item.title || ''), (item) => `${planStatus(String(item.status || ''))} ${formatDateTime(String(item.due_at || ''))}`, (item, actions) => {
+    actions.append(actionButton('Complete', () => void agendaAction('task.complete', { id: String(item.id) })));
+    actions.append(actionButton('Cancel', () => void agendaAction('task.cancel', { id: String(item.id) }), true));
+  });
+  appendPlanSection('Reminders', agenda.scheduled_reminders, (item) => String(item.content || ''), (item) => `${planStatus(String(item.status || ''))} ${formatDateTime(String(item.snoozed_until || item.scheduled_at || ''))}`, (item, actions) => {
+    actions.append(actionButton('Complete', () => void agendaAction('reminder.update', { id: String(item.id), status: 'completed' })));
+    actions.append(actionButton('Cancel', () => void agendaAction('reminder.cancel', { id: String(item.id) }), true));
+  });
+  appendPlanSection('Completed', agenda.completed_items, (item) => String(item.title || item.content || ''), (item) => planStatus(String(item.status || '')), () => {});
+  appendPlanSection('Recent actions', agenda.recent_receipts, (item) => String(item.summary || item.action || ''), (item) => receiptStatus(String(item.status || '')), (item, actions) => {
+    if (['preview_required', 'confirmation_required'].includes(String(item.status))) actions.append(actionButton('Confirm', () => void confirmAgendaAction(String(item.receipt_id))));
+  });
+  if (agenda.is_today) {
+    appendPlanSection('Overdue', agenda.overdue_tasks, (item) => String(item.title || ''), () => 'Overdue', (item, actions) => actions.append(actionButton('Complete', () => void agendaAction('task.complete', { id: String(item.id) }))));
+    appendPlanSection('Unscheduled', agenda.unscheduled_tasks, (item) => String(item.title || ''), (item) => planStatus(String(item.status || '')), () => {});
+  }
+  if (![...agenda.focus_tasks, ...agenda.scheduled_reminders, ...agenda.completed_items, ...agenda.recent_receipts, ...agenda.overdue_tasks, ...agenda.unscheduled_tasks].length) drawerContent.appendChild(emptyBlock('No items for this day'));
+}
+
+function agendaNavigation(agenda: AgendaView): HTMLElement {
+  const nav = document.createElement('div'); nav.className = 'agenda-navigation';
+  const previous = actionButton('Previous', () => { selectedAgendaDate = shiftAgendaDate(agenda.date, -1); void loadDrawer(); });
+  const today = actionButton('Today', () => { selectedAgendaDate = new Date().toISOString().slice(0, 10); void loadDrawer(); });
+  const next = actionButton('Next', () => { selectedAgendaDate = shiftAgendaDate(agenda.date, 1); void loadDrawer(); });
+  const picker = document.createElement('input'); picker.type = 'date'; picker.value = agenda.date;
+  picker.addEventListener('change', () => { if (picker.value) { selectedAgendaDate = picker.value; void loadDrawer(); } });
+  nav.append(previous, picker, today, next); return nav;
+}
+
+function shiftAgendaDate(value: string, days: number): string {
+  const date = new Date(`${value}T12:00:00`); date.setDate(date.getDate() + days); return date.toISOString().slice(0, 10);
+}
+
+async function agendaAction(action: string, arguments_: Record<string, unknown>): Promise<void> {
+  const payload = await api<{ receipt: Record<string, unknown> }>('/agenda/actions', { method: 'POST', body: JSON.stringify({ action, arguments: arguments_, client_action_id: `web_${crypto.randomUUID()}` }) });
+  if (['preview_required', 'confirmation_required'].includes(String(payload.receipt.status))) showActionConfirmation(payload.receipt);
+  await loadDrawer();
+}
+
+async function confirmAgendaAction(receiptId: string): Promise<void> {
+  await api(`/agenda/actions/${encodeURIComponent(receiptId)}/confirm`, { method: 'POST', body: '{}' });
+  await loadDrawer();
+}
+
+async function cancelAgendaAction(receiptId: string): Promise<void> {
+  await api(`/agenda/actions/${encodeURIComponent(receiptId)}/cancel`, { method: 'POST', body: '{}' });
+  await loadDrawer();
+}
+
+function showActionConfirmation(receipt: Record<string, unknown>): void {
+  const receiptId = String(receipt.receipt_id || '');
+  if (!receiptId) return;
+  document.querySelector<HTMLElement>('#action-confirmation')?.remove();
+  const dialog = document.createElement('section');
+  dialog.id = 'action-confirmation'; dialog.className = 'action-confirmation'; dialog.setAttribute('role', 'dialog'); dialog.setAttribute('aria-modal', 'true');
+  const card = document.createElement('div'); card.className = 'action-confirmation-card';
+  const title = document.createElement('h2'); title.textContent = '确认这个操作？';
+  const detail = document.createElement('p'); detail.textContent = String(receipt.summary || receipt.action || '该操作将修改你的个人状态。');
+  const actions = document.createElement('div'); actions.className = 'action-confirmation-actions';
+  const cancel = document.createElement('button'); cancel.type = 'button'; cancel.textContent = '取消';
+  const confirm = document.createElement('button'); confirm.type = 'button'; confirm.className = 'confirm'; confirm.textContent = '确认';
+  const setBusy = (busy: boolean) => { cancel.disabled = busy; confirm.disabled = busy; };
+  cancel.addEventListener('click', () => { setBusy(true); void cancelAgendaAction(receiptId).then(() => dialog.remove()).catch((error) => { setBusy(false); detail.textContent = error instanceof Error ? error.message : String(error); }); });
+  confirm.addEventListener('click', () => { setBusy(true); void confirmAgendaAction(receiptId).then(() => dialog.remove()).catch((error) => { setBusy(false); detail.textContent = error instanceof Error ? error.message : String(error); }); });
+  actions.append(cancel, confirm); card.append(title, detail, actions); dialog.appendChild(card); document.body.appendChild(dialog); confirm.focus();
 }
 
 function appendPlanSection(
@@ -652,7 +748,7 @@ function showPlanForm(): void {
       if (!control.name || control === kind || !control.value) continue;
       values[control.name] = control.type === 'datetime-local' ? new Date(control.value).toISOString() : control.value;
     }
-    void planAction(kind.value, 'create', '', values).catch((error) => {
+    void agendaAction(`${kind.value}.create`, values).catch((error) => {
       const failure = document.createElement('p'); failure.className = 'archive-error'; failure.textContent = error instanceof Error ? error.message : String(error); form.appendChild(failure);
     });
   });
@@ -778,6 +874,7 @@ async function memoryAction(memoryId: string, action: string, content = ''): Pro
 function actionButton(label: string, action: () => void, danger = false): HTMLButtonElement {
   const button = document.createElement('button'); button.type = 'button'; button.textContent = label; button.classList.toggle('danger', danger); button.addEventListener('click', action); return button;
 }
+function receiptStatus(value: string): string { return ({ accepted: 'Accepted', waiting_input: 'Needs input', preview_required: 'Needs confirmation', confirmation_required: 'Needs confirmation', succeeded: 'Succeeded', failed: 'Failed', cancelled: 'Cancelled', undone: 'Undone' } as Record<string, string>)[value] || value; }
 
 function skeletonBlock(): HTMLElement { const item = document.createElement('div'); item.className = 'drawer-skeleton'; item.innerHTML = '<i></i><i></i><i></i>'; return item; }
 function emptyBlock(message: string): HTMLElement { const item = document.createElement('div'); item.className = 'archive-empty'; item.textContent = message; return item; }

@@ -390,6 +390,7 @@ class RunEventStore:
             "executor": metadata.get("executor", ""),
             "usage": metadata.get("usage", metadata.get("budget", {})),
             "pending_action": metadata.get("pending_action"),
+            "action_receipt": metadata.get("action_receipt"),
             "paused": row["status"] in {"waiting_input", "waiting_confirmation"},
             "pending_action_id": (metadata.get("pending_action") or {}).get("pending_action_id", ""),
             "missing_fields": metadata.get("missing_fields", []),

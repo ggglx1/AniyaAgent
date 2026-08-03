@@ -47,3 +47,9 @@ class WeixinBindingRequest(BaseModel):
     code: str = Field(min_length=1, max_length=64)
     recipient_id: str = Field(min_length=1, max_length=256)
     context_token: str = Field(min_length=1, max_length=4096)
+
+
+class AgendaActionRequest(BaseModel):
+    action: str = Field(min_length=1, max_length=64)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    client_action_id: str = Field(min_length=1, max_length=128)

@@ -12,3 +12,6 @@ __all__ = [
     "PersonalTask",
     "RoutineManager",
 ]
+from .agenda import AgendaQueryService
+
+__all__ = ["AgendaQueryService"]

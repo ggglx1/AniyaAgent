@@ -94,6 +94,7 @@ type RunSnapshot = {
   finalContent?: string;
   errorCode?: string;
   errorMessage?: string;
+  actionReceipt?: Record<string, unknown>;
 };
 
 type RunConnection = RunSnapshot & {
@@ -109,6 +110,7 @@ type RunApiState = {
   error_code?: string;
   error_message?: string;
   track_id?: string;
+  action_receipt?: Record<string, unknown>;
 };
 
 const __filename = fileURLToPath(import.meta.url);
@@ -225,6 +227,8 @@ function serveStatic(req: IncomingMessage, res: ServerResponse): void {
 }
 
 function isOwner(req: IncomingMessage): boolean {
+  // Local development can run without a browser login, but only on loopback.
+  if (!ownerToken) return true;
   const cookie = String(req.headers.cookie || '').split(';').map((value) => value.trim())
     .find((value) => value.startsWith(`${ownerCookieName}=`));
   const sessionId = cookie?.slice(ownerCookieName.length + 1) || '';
@@ -597,9 +601,11 @@ class WebChannelBridge {
         run.status = event.type;
         run.terminal = true; // paused is transport-terminal; continuation has a new Run ID.
         run.finalContent = String(event.content || '');
+        run.actionReceipt = event.metadata?.action_receipt as Record<string, unknown> | undefined;
         latestStatus = event.type;
         if (owner && run.finalContent) sendJson(owner, { type: 'agent.output', data: { role: 'assistant', content: run.finalContent } });
         if (owner) sendJson(owner, { type: 'agent.status', data: { status: event.type, requestId: run.requestId } });
+        this.notifyRun(run);
         return true;
       case 'completed':
       case 'failed':
@@ -624,6 +630,7 @@ class WebChannelBridge {
       finalContent: String(event.content || ''),
       errorCode: String(event.error_code || ''),
       errorMessage: String(event.error || ''),
+      actionReceipt: event.metadata?.action_receipt as Record<string, unknown> | undefined,
     });
   }
 
@@ -633,16 +640,18 @@ class WebChannelBridge {
       finalContent: String(state.final_content || ''),
       errorCode: String(state.error_code || ''),
       errorMessage: String(state.error_message || ''),
+      actionReceipt: state.action_receipt,
     }, replay);
   }
 
-  private finishRun(run: RunConnection, status: RunStatus, result: { finalContent?: string; errorCode?: string; errorMessage?: string }, replay = false): void {
+  private finishRun(run: RunConnection, status: RunStatus, result: { finalContent?: string; errorCode?: string; errorMessage?: string; actionReceipt?: Record<string, unknown> }, replay = false): void {
     if (run.terminal && !replay) return;
     run.status = status;
     run.terminal = true;
     run.finalContent = result.finalContent || '';
     run.errorCode = result.errorCode || '';
     run.errorMessage = result.errorMessage || '';
+    run.actionReceipt = result.actionReceipt;
     latestStatus = status === 'completed' ? 'ready' : status;
     const owner = run.owner;
     if (owner && (status === 'completed' || status === 'waiting_input' || status === 'waiting_confirmation') && run.finalContent) {
@@ -669,6 +678,7 @@ class WebChannelBridge {
         finalContent: run.finalContent,
         errorCode: run.errorCode,
         errorMessage: run.errorMessage,
+        actionReceipt: run.actionReceipt,
       },
     });
   }
@@ -766,7 +776,8 @@ const server = createServer((req, res) => {
     ]);
     const targetPath = url.pathname.slice(4);
     const runPathAllowed = /^\/runs\/(?:active|[A-Za-z0-9_-]+)$/.test(targetPath);
-    if (!allowed.has(targetPath) && !runPathAllowed) {
+    const agendaPathAllowed = /^\/agenda(?:\/(?:dates|receipts|actions(?:\/[A-Za-z0-9_-]+\/(?:confirm|cancel))?))?$/.test(targetPath);
+    if (!allowed.has(targetPath) && !runPathAllowed && !agendaPathAllowed) {
       res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({ ok: false, error: 'Not found' }));
       return;
@@ -894,11 +905,11 @@ server.on('upgrade', (req, socket, head) => {
   wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
 });
 
-if (!ownerToken || ownerToken.startsWith('replace_') || ownerToken.length < 32) {
+if (ownerToken && (ownerToken.startsWith('replace_') || ownerToken.length < 32)) {
   throw new Error('ANIYAAGENT_OWNER_TOKEN is required. Refusing to start a private assistant without owner authentication.');
 }
 
-server.listen(port, '0.0.0.0', () => {
+server.listen(port, ownerToken ? '0.0.0.0' : '127.0.0.1', () => {
   console.log('AniyaAgent Web UI is running:');
   for (const url of localUrls()) console.log(`  ${url}`);
   console.log('');

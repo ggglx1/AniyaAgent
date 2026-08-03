@@ -10,7 +10,7 @@ from .models import PersonalProject, PersonalReminder, PersonalRoutine, Personal
 
 
 class PersonalStateRepository:
-    schema_version = 2
+    schema_version = 3
 
     def __init__(self, workdir: Path):
         self.workdir = workdir.resolve()
@@ -125,6 +125,29 @@ class PersonalStateRepository:
                 );
                 CREATE INDEX IF NOT EXISTS idx_personal_activity_user_created
                     ON personal_activity(user_id, created_at DESC);
+                CREATE TABLE IF NOT EXISTS action_receipts (
+                    receipt_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL DEFAULT '',
+                    command_id TEXT NOT NULL DEFAULT '',
+                    idempotency_key TEXT NOT NULL DEFAULT '',
+                    source_message_id TEXT NOT NULL DEFAULT '',
+                    channel_id TEXT NOT NULL DEFAULT '',
+                    action TEXT NOT NULL,
+                    entity_type TEXT NOT NULL DEFAULT '',
+                    entity_id TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL,
+                    summary TEXT NOT NULL DEFAULT '',
+                    details_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    completed_at TEXT NOT NULL DEFAULT '',
+                    undo_until TEXT NOT NULL DEFAULT '',
+                    parent_receipt_id TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_action_receipts_user_created
+                    ON action_receipts(user_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_action_receipts_idempotency
+                    ON action_receipts(user_id, idempotency_key);
                 """
             )
             connection.execute(
@@ -232,6 +255,79 @@ class PersonalStateRepository:
             item["after"] = json.loads(after_json) if after_json else None
             result.append(item)
         return result
+
+    def save_receipt(self, receipt: dict) -> dict:
+        columns = (
+            "receipt_id", "user_id", "run_id", "command_id", "idempotency_key",
+            "source_message_id", "channel_id", "action", "entity_type", "entity_id",
+            "status", "summary", "details_json", "created_at", "completed_at",
+            "undo_until", "parent_receipt_id",
+        )
+        values = dict(receipt)
+        values["details_json"] = json.dumps(values.get("details") or {}, ensure_ascii=False)
+        with self.lock, self.connect() as connection:
+            connection.execute(
+                f"INSERT INTO action_receipts ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
+                [values.get(column, "") for column in columns],
+            )
+        return self.get_receipt(str(values["receipt_id"]), str(values["user_id"]))
+
+    def update_receipt(self, receipt_id: str, user_id: str, **changes) -> dict:
+        allowed = {"status", "summary", "details", "entity_type", "entity_id", "completed_at", "undo_until", "parent_receipt_id"}
+        invalid = set(changes) - allowed
+        if invalid:
+            raise ValueError(f"Unsupported receipt fields: {', '.join(sorted(invalid))}")
+        values = dict(changes)
+        if "details" in values:
+            values["details_json"] = json.dumps(values.pop("details") or {}, ensure_ascii=False)
+        if not values:
+            return self.get_receipt(receipt_id, user_id)
+        assignments = ",".join(f"{field}=?" for field in values)
+        with self.lock, self.connect() as connection:
+            cursor = connection.execute(
+                f"UPDATE action_receipts SET {assignments} WHERE receipt_id=? AND user_id=?",
+                [*values.values(), receipt_id, user_id],
+            )
+            if cursor.rowcount != 1:
+                raise FileNotFoundError(f"Action receipt not found: {receipt_id}")
+        return self.get_receipt(receipt_id, user_id)
+
+    def get_receipt(self, receipt_id: str, user_id: str) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM action_receipts WHERE receipt_id=? AND user_id=?", (receipt_id, user_id)
+            ).fetchone()
+        return self.decode_receipt(row) if row else None
+
+    def find_receipt_by_key(self, user_id: str, idempotency_key: str) -> dict | None:
+        if not idempotency_key:
+            return None
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM action_receipts WHERE user_id=? AND idempotency_key=? ORDER BY created_at DESC LIMIT 1",
+                (user_id, idempotency_key),
+            ).fetchone()
+        return self.decode_receipt(row) if row else None
+
+    def list_receipts(self, user_id: str, start_at: str = "", end_at: str = "", limit: int = 100) -> list[dict]:
+        clauses, params = ["user_id=?"], [user_id]
+        if start_at:
+            clauses.append("created_at>=?")
+            params.append(start_at)
+        if end_at:
+            clauses.append("created_at<?")
+            params.append(end_at)
+        params.append(max(1, min(limit, 500)))
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM action_receipts WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT ?", params
+            ).fetchall()
+        return [self.decode_receipt(row) for row in rows]
+
+    def decode_receipt(self, row) -> dict:
+        item = dict(row)
+        item["details"] = json.loads(item.pop("details_json") or "{}")
+        return item
 
     def encode_record(self, data: dict) -> dict:
         encoded = dict(data)
