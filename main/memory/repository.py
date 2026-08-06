@@ -89,6 +89,24 @@ class MemoryRepository:
                     reason TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS retrieval_events (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    repository_id TEXT NOT NULL DEFAULT '',
+                    query_summary TEXT NOT NULL,
+                    candidate_count INTEGER NOT NULL,
+                    selected_ids_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS memory_candidates (
+                    candidate_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, payload_json TEXT NOT NULL,
+                    source_fingerprint TEXT NOT NULL, dedupe_key TEXT NOT NULL, status TEXT NOT NULL,
+                    rejection_reason TEXT NOT NULL DEFAULT '', conflict_memory_id TEXT NOT NULL DEFAULT '',
+                    extractor_version TEXT NOT NULL, memory_id TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_candidates_dedupe ON memory_candidates(user_id, dedupe_key, status);
                 CREATE INDEX IF NOT EXISTS idx_memory_history_memory
                     ON memory_history(memory_id, created_at);
                 """
@@ -98,11 +116,63 @@ class MemoryRepository:
             self.ensure_column(connection, "memories", "review_at", "TEXT NOT NULL DEFAULT ''")
             self.ensure_column(connection, "memories", "origin", "TEXT NOT NULL DEFAULT 'explicit_user'")
             self.ensure_column(connection, "memories", "retrieval_count", "INTEGER NOT NULL DEFAULT 0")
+            self.ensure_column(connection, "memory_candidates", "memory_id", "TEXT NOT NULL DEFAULT ''")
             self.rebuild_ngram_index(connection)
             connection.execute(
                 "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('version', ?)",
                 (str(self.schema_version),),
             )
+
+    def record_retrieval(self, *, user_id: str, mode: str, repository_id: str, query: str, candidate_count: int, selected_ids: list[str]) -> str:
+        event_id = f"retrieval_{__import__('uuid').uuid4().hex[:16]}"
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+        with self.lock, self.connect() as connection:
+            connection.execute("INSERT INTO retrieval_events VALUES (?,?,?,?,?,?,?,?)", (event_id, user_id, mode, repository_id, query[:500], candidate_count, json.dumps(selected_ids, ensure_ascii=False), now))
+        return event_id
+
+    def record_candidate(self, candidate: dict, *, user_id: str, source_fingerprint: str, dedupe_key: str, status: str = 'candidate', extractor_version: str, rejection_reason: str = '', conflict_memory_id: str = '') -> str:
+        from datetime import datetime, timezone
+        import uuid
+        now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+        candidate_id = f'candidate_{uuid.uuid4().hex[:16]}'
+        with self.lock, self.connect() as connection:
+            row = connection.execute("SELECT candidate_id FROM memory_candidates WHERE user_id=? AND dedupe_key=? AND status=?", (user_id, dedupe_key, status)).fetchone()
+            if row: return str(row['candidate_id'])
+            connection.execute("INSERT INTO memory_candidates VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (candidate_id, user_id, json.dumps(candidate, ensure_ascii=False), source_fingerprint, dedupe_key, status, rejection_reason, conflict_memory_id, extractor_version, '', now, now))
+        return candidate_id
+
+    def candidate(self, candidate_id: str, user_id: str = 'local') -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM memory_candidates WHERE candidate_id=? AND user_id=?", (candidate_id, user_id)).fetchone()
+        return self.candidate_row(row) if row else None
+
+    def candidates(self, user_id: str = 'local', statuses: list[str] | None = None, limit: int = 100) -> list[dict]:
+        clauses, params = ["user_id=?"], [user_id]
+        if statuses:
+            clauses.append("status IN (%s)" % ",".join("?" for _ in statuses)); params.extend(statuses)
+        params.append(max(1, min(limit, 500)))
+        with self.connect() as connection:
+            rows = connection.execute("SELECT * FROM memory_candidates WHERE %s ORDER BY updated_at DESC LIMIT ?" % " AND ".join(clauses), params).fetchall()
+        return [self.candidate_row(row) for row in rows]
+
+    def update_candidate(self, candidate_id: str, *, user_id: str = 'local', status: str, memory_id: str = '', rejection_reason: str = '') -> dict:
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+        with self.lock, self.connect() as connection:
+            connection.execute("UPDATE memory_candidates SET status=?, memory_id=CASE WHEN ?='' THEN memory_id ELSE ? END, rejection_reason=?, updated_at=? WHERE candidate_id=? AND user_id=?", (status, memory_id, memory_id, rejection_reason, now, candidate_id, user_id))
+        result = self.candidate(candidate_id, user_id)
+        if result is None: raise FileNotFoundError(f'Memory candidate not found: {candidate_id}')
+        return result
+
+    def candidate_row(self, row) -> dict:
+        data = dict(row); data['payload'] = json.loads(data.pop('payload_json') or '{}')
+        return data
+
+    def retrieval_events(self, user_id: str = 'local', limit: int = 100) -> list[dict]:
+        with self.connect() as connection:
+            rows = connection.execute("SELECT * FROM retrieval_events WHERE user_id=? ORDER BY created_at DESC LIMIT ?", (user_id, max(1, min(limit, 500)))).fetchall()
+        return [{**dict(row), 'selected_ids': json.loads(row['selected_ids_json'])} for row in rows]
 
     def create(self, record: MemoryRecord, history: MemoryHistoryRecord) -> MemoryRecord:
         with self.lock, self.connect() as connection:

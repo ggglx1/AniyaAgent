@@ -17,6 +17,7 @@ from .schemas import MemoryActionRequest, MessageRequest, PermissionRequest, Pro
 from .schemas import AgendaActionRequest
 from main.actions import ActionCommandService, StructuredCommand
 from main.personal import AgendaQueryService
+from main.evolution import EvolutionAssetRegistry, FeatureFlags
 
 
 def ok(**payload): return {"ok": True, **payload}
@@ -35,7 +36,7 @@ def create_api(application, bridge, auth_token: str = "") -> FastAPI:
 
     app = FastAPI(title="AniyaAgent API", version="1.0.0", lifespan=lifespan)
     app.state.auth_token = auth_token
-    app.state.services = {"application": application, "bridge": bridge, "memory": bridge.memory_admin, "llm": bridge.llm_control, "attachments": application.attachments, "mcp": application.mcp, "agenda": AgendaQueryService(application.runtime.personal_state, application.runtime.profile_store), "action_commands": ActionCommandService(application)}
+    app.state.services = {"application": application, "bridge": bridge, "memory": bridge.memory_admin, "llm": bridge.llm_control, "attachments": application.attachments, "mcp": application.mcp, "agenda": AgendaQueryService(application.runtime.personal_state, application.runtime.profile_store), "action_commands": ActionCommandService(application), "evolution": EvolutionAssetRegistry(application.runtime.WORKDIR), "feature_flags": FeatureFlags(application.runtime.WORKDIR)}
     origins = [value.strip() for value in os.getenv("ANIYAAGENT_CORS_ORIGINS", "http://localhost,http://127.0.0.1").split(",") if value.strip()]
     app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=False, allow_methods=["GET", "POST", "OPTIONS"], allow_headers=["Authorization", "Content-Type", "X-AniyaAgent-Token"])
     install_error_handlers(app)
@@ -179,6 +180,29 @@ def create_api(application, bridge, auth_token: str = "") -> FastAPI:
     @mcp.get("/health")
     async def mcp_health(data=Depends(services)): return ok(**data["mcp"].health())
 
+    evolution = APIRouter(prefix="/evolution", dependencies=auth)
+    @evolution.get("/assets")
+    async def evolution_assets(status: str = "", limit: int = Query(100, ge=1, le=500), data=Depends(services)):
+        return ok(assets=[asset.__dict__ for asset in data["evolution"].list(status, limit)])
+    @evolution.get("/assets/{asset_id}")
+    async def evolution_asset(asset_id: str, data=Depends(services)):
+        asset=data["evolution"].get(asset_id)
+        return ok(asset=asset.__dict__, events=data["evolution"].events(asset_id))
+    @evolution.post("/assets/{asset_id}/{action}")
+    async def evolution_action(asset_id: str, action: str, data=Depends(services)):
+        status_map={"approve":"approved", "reject":"invalidated", "defer":"paused", "rollback":"rolled_back"}
+        if action not in status_map:
+            from fastapi import HTTPException; raise HTTPException(status_code=400, detail={"error":"invalid_evolution_action"})
+        asset=data["evolution"].transition(asset_id, status_map[action], actor="web", reason=action)
+        return ok(asset=asset.__dict__)
+    @evolution.get("/feature-flags")
+    async def feature_flags(data=Depends(services)): return ok(flags=data["feature_flags"].all())
+    @evolution.post("/feature-flags/{name}")
+    async def set_feature_flag(name: str, payload: dict, data=Depends(services)):
+        if not isinstance(payload.get("enabled"), bool):
+            from fastapi import HTTPException; raise HTTPException(status_code=400, detail={"error":"enabled_boolean_required"})
+        return ok(enabled=data["feature_flags"].set(name, payload["enabled"], actor="web"))
+
     stream = APIRouter(dependencies=auth)
     @stream.get("/stream")
     async def event_stream(request: Request, request_id: str, after_sequence: int = Query(0, ge=0), data=Depends(services)):
@@ -216,5 +240,5 @@ def create_api(application, bridge, auth_token: str = "") -> FastAPI:
         if not data["bridge"].cancel_run(run_id): from fastapi import HTTPException; raise HTTPException(status_code=409, detail={"error":"run_not_cancellable","message":"Run is already terminal or unavailable."})
         return ok(cancelled=True)
 
-    for router in (system, conversation, message_router, attachments, providers, memory, plans, agenda, notifications, weixin, mcp, stream, runs): app.include_router(router)
+    for router in (system, conversation, message_router, attachments, providers, memory, plans, agenda, notifications, weixin, mcp, evolution, stream, runs): app.include_router(router)
     return app

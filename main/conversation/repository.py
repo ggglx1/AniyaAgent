@@ -90,6 +90,26 @@ class ConversationMemoryRepository:
                     content_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS tool_exchanges (
+                    exchange_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, mode TEXT NOT NULL,
+                    scope_id TEXT NOT NULL, track_id TEXT NOT NULL, status TEXT NOT NULL,
+                    side_effect_receipt_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+                    completed_at TEXT NOT NULL DEFAULT ''
+                );
+                CREATE TABLE IF NOT EXISTS tool_exchange_members (
+                    exchange_id TEXT NOT NULL, message_id TEXT NOT NULL, member_kind TEXT NOT NULL,
+                    PRIMARY KEY(exchange_id, message_id),
+                    FOREIGN KEY(exchange_id) REFERENCES tool_exchanges(exchange_id)
+                );
+                CREATE TABLE IF NOT EXISTS daily_memory_versions (
+                    daily_memory_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, mode TEXT NOT NULL,
+                    scope_id TEXT NOT NULL, track_id TEXT NOT NULL, local_date TEXT NOT NULL,
+                    version INTEGER NOT NULL, timezone_name TEXT NOT NULL, payload_json TEXT NOT NULL,
+                    input_fingerprint TEXT NOT NULL, policy_version TEXT NOT NULL,
+                    status TEXT NOT NULL, failure_reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+                    UNIQUE(owner_id, mode, scope_id, track_id, local_date, version)
+                );
+                CREATE INDEX IF NOT EXISTS idx_daily_versions_current ON daily_memory_versions(owner_id, mode, scope_id, track_id, local_date, version DESC);
                 CREATE INDEX IF NOT EXISTS idx_conversation_attachments_message ON conversation_attachments(message_id);
                 """
             )
@@ -122,6 +142,9 @@ class ConversationMemoryRepository:
                 lease_name TEXT PRIMARY KEY, worker_id TEXT NOT NULL, expires_at TEXT NOT NULL, updated_at TEXT NOT NULL
             );
         """)
+        self.ensure_column(connection, "maintenance_requests", "attempts", "INTEGER NOT NULL DEFAULT 0")
+        self.ensure_column(connection, "maintenance_requests", "last_error", "TEXT NOT NULL DEFAULT ''")
+        self.ensure_column(connection, "maintenance_requests", "cancelled_at", "TEXT NOT NULL DEFAULT ''")
         version = connection.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()[0]
         if version >= 2:
             return
@@ -188,6 +211,33 @@ class ConversationMemoryRepository:
             connection.execute("""INSERT INTO conversation_track_messages(message_id,owner_id,mode,scope_id,track_id,repository_id,work_session_id,topic_id,day_date,sequence,track_sequence,role,content_json,channel,timezone_at_write,created_at,reply_to_message_id,metadata_json,retention_class,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (message.message_id,owner_id,mode,scope_id,track_id,repository_id,work_session_id,topic_id,date,sequence,track_sequence,role,json.dumps(message.content,ensure_ascii=False),channel,timezone_name,created_at,reply_to_message_id,json.dumps(message.metadata,ensure_ascii=False),retention_class,expires_at))
         return message
 
+    def record_tool_exchange(self, assistant_message_id: str, result_message_id: str, *, owner_id: str = 'local', mode: str = 'assistant', scope_id: str = 'personal', track_id: str = 'assistant:personal', status: str = 'completed', receipt_id: str = '') -> str:
+        exchange_id = f'exchange_{uuid.uuid4().hex[:16]}'
+        now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+        with self.lock, self.connect() as connection:
+            connection.execute("INSERT INTO tool_exchanges VALUES (?,?,?,?,?,?,?,?,?)", (exchange_id, owner_id, mode, scope_id, track_id, status, receipt_id, now, now if status != 'running' else ''))
+            connection.execute("INSERT INTO tool_exchange_members VALUES (?,?,?)", (exchange_id, assistant_message_id, 'tool_use'))
+            connection.execute("INSERT INTO tool_exchange_members VALUES (?,?,?)", (exchange_id, result_message_id, 'tool_result'))
+        return exchange_id
+
+    def create_daily_version(self, local_date: str, daily: dict, fingerprint: str, *, owner_id: str = 'local', mode: str = 'assistant', scope_id: str = 'personal', track_id: str = 'assistant:personal', timezone_name: str = 'Asia/Shanghai', policy_version: str = 'daily-v1') -> dict:
+        now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+        with self.lock, self.connect() as connection:
+            prior = connection.execute("SELECT COALESCE(MAX(version), 0) FROM daily_memory_versions WHERE owner_id=? AND mode=? AND scope_id=? AND track_id=? AND local_date=?", (owner_id, mode, scope_id, track_id, local_date)).fetchone()[0]
+            version = int(prior) + 1; memory_id = f'daily_{uuid.uuid4().hex[:16]}'
+            connection.execute("UPDATE daily_memory_versions SET status='superseded' WHERE owner_id=? AND mode=? AND scope_id=? AND track_id=? AND local_date=? AND status IN ('open','generated','stale')", (owner_id, mode, scope_id, track_id, local_date))
+            connection.execute("INSERT INTO daily_memory_versions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (memory_id, owner_id, mode, scope_id, track_id, local_date, version, timezone_name, json.dumps(daily, ensure_ascii=False), fingerprint, policy_version, daily.get('status', 'generated'), daily.get('failure_reason', ''), now))
+        return {"daily_memory_id": memory_id, "version": version, **daily}
+
+    def mark_daily_stale_for_message(self, message_id: str) -> int:
+        with self.lock, self.connect() as connection:
+            rows = connection.execute("SELECT daily_memory_id, payload_json FROM daily_memory_versions WHERE status='generated'").fetchall(); changed = 0
+            for row in rows:
+                payload = json.loads(row['payload_json'])
+                if message_id in payload.get('source_message_ids', []):
+                    changed += connection.execute("UPDATE daily_memory_versions SET status='stale' WHERE daily_memory_id=? AND status='generated'", (row['daily_memory_id'],)).rowcount
+        return changed
+
     def track_history(self, *, mode: str, scope_id: str, track_id: str, owner_id: str = 'local', limit: int = 50, before_sequence: int | None = None, include_redacted: bool = False) -> list[ConversationMessage]:
         conditions = ['owner_id=?','mode=?','scope_id=?','track_id=?']; args = [owner_id, mode, scope_id, track_id]
         if not include_redacted: conditions.append("redacted_at='' ")
@@ -245,15 +295,24 @@ class ConversationMemoryRepository:
             rows=connection.execute("SELECT * FROM maintenance_requests WHERE state='pending' ORDER BY created_at LIMIT ?", (limit,)).fetchall()
             for row in rows:
                 token=uuid.uuid4().hex
-                if connection.execute("UPDATE maintenance_requests SET state='claimed',worker_id=?,claim_token=?,lease_expires_at=?,updated_at=? WHERE id=? AND state='pending'", (worker_id,token,until,now_s,row['id'])).rowcount:
+                if connection.execute("UPDATE maintenance_requests SET state='claimed',worker_id=?,claim_token=?,lease_expires_at=?,attempts=attempts+1,updated_at=? WHERE id=? AND state='pending'", (worker_id,token,until,now_s,row['id'])).rowcount:
                     item=dict(row); item['claim_token']=token; claimed.append(item)
             connection.execute('COMMIT')
         return claimed
 
     def complete_maintenance(self, request_id: str, claim_token: str, error: str = '') -> bool:
-        now=datetime.now(timezone.utc).isoformat().replace('+00:00','Z'); state='failed' if error else 'completed'
+        now=datetime.now(timezone.utc).isoformat().replace('+00:00','Z')
         with self.lock, self.connect() as connection:
-            return bool(connection.execute("UPDATE maintenance_requests SET state=?,updated_at=?,completed_at=?,lease_expires_at='' WHERE id=? AND state='claimed' AND claim_token=?", (state,now,now,request_id,claim_token)).rowcount)
+            row=connection.execute("SELECT attempts FROM maintenance_requests WHERE id=?", (request_id,)).fetchone()
+            attempts=int(row['attempts']) if row else 0
+            state='completed' if not error else ('dead_letter' if attempts >= 5 else 'pending')
+            completed=now if state in {'completed','dead_letter'} else ''
+            return bool(connection.execute("UPDATE maintenance_requests SET state=?,last_error=?,updated_at=?,completed_at=?,lease_expires_at='' WHERE id=? AND state='claimed' AND claim_token=?", (state,error[:1000],now,completed,request_id,claim_token)).rowcount)
+
+    def cancel_maintenance(self, request_id: str) -> bool:
+        now=datetime.now(timezone.utc).isoformat().replace('+00:00','Z')
+        with self.lock, self.connect() as connection:
+            return bool(connection.execute("UPDATE maintenance_requests SET state='cancelled',cancelled_at=?,updated_at=?,lease_expires_at='' WHERE id=? AND state IN ('pending','claimed')", (now,now,request_id)).rowcount)
 
     def to_track_message(self, row) -> ConversationMessage:
         return ConversationMessage(row['message_id'],row['day_date'],row['sequence'],row['role'],json.loads(row['content_json']),row['channel'],row['timezone_at_write'],row['created_at'],row['reply_to_message_id'],json.loads(row['metadata_json']),row['redacted_at'],row['owner_id'],row['mode'],row['scope_id'],row['track_id'],row['repository_id'],row['work_session_id'],row['topic_id'],row['retention_class'],row['expires_at'],row['track_sequence'])

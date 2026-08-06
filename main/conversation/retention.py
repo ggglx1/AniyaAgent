@@ -18,6 +18,7 @@ class ConversationRetentionService:
         original_text = self.text(message.content) if message else ""
         linked_memory_ids = self.repository.linked_long_term_memory_ids(message_id)
         self.repository.redact_message(message_id)
+        self.repository.mark_daily_stale_for_message(message_id)
         self.repository.invalidate_message_sources(message_id)
         # A fact without its only raw source must not remain silently trusted.
         if self.personal_memory is not None:

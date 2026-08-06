@@ -40,6 +40,7 @@ class PersonalMemoryRetriever:
 
         selected = [record for record in sorted(candidates, key=score, reverse=True) if score(record) >= 0][:limit]
         self.last_retrieved_ids = [record.id for record in selected]
+        self.manager.repository.record_retrieval(user_id=user_id, mode=mode, repository_id=repository_id, query=query, candidate_count=len(candidates), selected_ids=self.last_retrieved_ids)
         self.manager.repository.mark_accessed(selected, self.manager.now_iso())
         return selected
 

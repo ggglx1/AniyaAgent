@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from main.conversation.service import ConversationMemoryService
 from datetime import datetime, timedelta
+import hashlib
+import json
 from zoneinfo import ZoneInfo
 
 from .classifier import CandidateClassifier
@@ -14,10 +16,12 @@ from .candidate_validator import CandidateValidator
 from .processing_ledger import ProcessingLedger
 from .intent_guard import IntentGuard
 from .scopes import MemoryScopePolicy
+from .candidate_service import MemoryCandidateService
+from main.evolution import FeatureFlags
 
 
 class StructuredMemoryPipeline:
-    def __init__(self, manager: PersonalMemoryManager, conversation: ConversationMemoryService, profile_store=None, personal_state=None, llm_extractor=None):
+    def __init__(self, manager: PersonalMemoryManager, conversation: ConversationMemoryService, profile_store=None, personal_state=None, llm_extractor=None, feature_flags=None):
         self.manager = manager
         self.conversation = conversation
         self.profile_store = profile_store
@@ -31,8 +35,12 @@ class StructuredMemoryPipeline:
         self.ledger = ProcessingLedger(manager.workdir)
         self.extractor_version = "memory-pipeline-v2"
         self.intent_guard = IntentGuard()
+        self.candidates = MemoryCandidateService(manager)
+        self.feature_flags = feature_flags or FeatureFlags(manager.workdir)
 
     def process(self, message_ids: list[str], user_id: str = "local", mode: str = "assistant", repository_id: str = "") -> list[str]:
+        if not self.feature_flags.enabled("memory.auto_extract_long_term"):
+            return []
         if mode == "qa":
             return []
         records = self.conversation.repository.track_messages_by_ids(message_ids, mode=mode)
@@ -49,6 +57,8 @@ class StructuredMemoryPipeline:
                 candidate = self.validator.validate(self.classifier.classify(raw), {item.message_id for item in records})
                 if candidate is None:
                     continue
+                source_fingerprint = hashlib.sha256(json.dumps(candidate.get("source_message_ids", []), sort_keys=True).encode("utf-8")).hexdigest()
+                dedupe_key = hashlib.sha256(f"{candidate.get('memory_type','')}:{candidate.get('content','').strip().lower()}".encode("utf-8")).hexdigest()
                 decision = self.policy.decide(candidate)
                 scope = self.scope_for(mode, repository_id, candidate)
                 candidate["scope"] = scope
@@ -56,20 +66,24 @@ class StructuredMemoryPipeline:
                 if decision == "route_profile":
                     self.update_profile(candidate)
                     continue
+                candidate_id = self.candidates.propose(candidate, user_id=user_id, source_fingerprint=source_fingerprint, dedupe_key=dedupe_key, extractor_version=self.extractor_version)
                 if decision not in {"write_active", "write_pending"}:
+                    self.candidates.reject(candidate_id, decision, user_id=user_id)
                     continue
                 resolution, existing = self.resolver.resolve(candidate, user_id)
                 if resolution == "duplicate":
+                    self.manager.repository.update_candidate(candidate_id, user_id=user_id, status="duplicate")
                     continue
-                if resolution == "conflict":
-                    record = self.manager.supersede(existing.id, candidate["content"], user_id=user_id, reason="new explicit conversation fact")
-                else:
-                    record = self.manager.add_scoped(
-                        content=candidate["content"], memory_type=candidate["memory_type"], user_id=user_id,
-                        explicit=decision == "write_active", importance=candidate["importance"], confidence=candidate["confidence"],
-                        tags=candidate["tags"], entity_refs=candidate["entity_refs"], source="conversation_explicit" if candidate["explicit"] else "conversation_inference",
-                        origin=candidate["origin"], valid_until=candidate["valid_until"], metadata={"source_message_ids": candidate["source_message_ids"]}, reason="conversation memory pipeline", scope=scope, repository_id=repository_id,
-                    )
+                if resolution == "conflict" and existing:
+                    self.manager.repository.update_candidate(candidate_id, user_id=user_id, status="candidate", rejection_reason="", memory_id="")
+                    # The conflict target is persisted separately so a confirmation never silently overwrites it.
+                    with self.manager.repository.connect() as connection:
+                        connection.execute("UPDATE memory_candidates SET conflict_memory_id=? WHERE candidate_id=?", (existing.id, candidate_id))
+                if decision == "write_pending" or resolution == "conflict":
+                    self.manager.repository.update_candidate(candidate_id, user_id=user_id, status="pending_confirmation")
+                    continue
+                record_id = self.candidates.publish(candidate_id, user_id=user_id)
+                record = self.manager.require(record_id, user_id)
                 self.conversation.repository.link_long_term_memory(record.id, candidate["source_message_ids"], "explicit_source" if candidate["explicit"] else "inferred_from")
                 created.append(record.id)
             self.ledger.mark([item.message_id for item in records], self.extractor_version, self.manager.now_iso())

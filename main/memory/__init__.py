@@ -6,6 +6,7 @@ from .workspace_sync import MemoryWorkspaceSync
 from .mode import MemoryMode, MemoryRuntimeConfig
 from .context import MemoryContextAssembler
 from .pipeline import StructuredMemoryPipeline
+from .candidate_service import MemoryCandidateService
 from .consolidator import MemoryConsolidator
 from .maintenance import MemoryMaintenanceService
 from .scopes import MemoryScopePolicy
@@ -20,6 +21,7 @@ from .semantic_provider import SemanticSearchProvider
 __all__ = [
     "MemoryRecord",
     "MemoryRepository",
+    "MemoryCandidateService",
     "MemorySource",
     "MemoryStatus",
     "MemoryType",

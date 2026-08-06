@@ -5,20 +5,23 @@ from datetime import datetime
 
 from .repository import ConversationMemoryRepository
 from .daily_memory_generator import DailyMemoryGenerator
+from main.evolution import FeatureFlags
 
 
 class ConversationMemoryService:
     max_inline_tool_chars = 8000
-    def __init__(self, repository: ConversationMemoryRepository, personal_state=None):
+    def __init__(self, repository: ConversationMemoryRepository, personal_state=None, feature_flags=None):
         self.repository = repository
         self.personal_state = personal_state
         self.last_recent_ids: list[str] = []
         self.last_daily_ids: list[str] = []
         self.daily_generator = DailyMemoryGenerator()
+        self.feature_flags = feature_flags or FeatureFlags(repository.workdir)
 
     def append_runtime_messages(self, messages: list, start_index: int, timezone_name: str) -> list[str]:
         stored_ids = []
         reply_to = ""
+        previous_assistant_tool_message = ""
         for message in messages[start_index:]:
             role = str(message.get("role", "system"))
             content = self.archive_content(message.get("content", ""))
@@ -34,6 +37,11 @@ class ConversationMemoryService:
                 stored.content = self.tool_summary(content, attachment_id)
                 self.repository.replace_message_content(stored.message_id, stored.content)
             stored_ids.append(stored.message_id)
+            if factual_role == "assistant" and self.has_tool_use(content):
+                previous_assistant_tool_message = stored.message_id
+            elif factual_role == "tool" and previous_assistant_tool_message:
+                self.repository.record_tool_exchange(previous_assistant_tool_message, stored.message_id)
+                previous_assistant_tool_message = ""
             if factual_role == "user":
                 reply_to = stored.message_id
         return stored_ids
@@ -61,6 +69,9 @@ class ConversationMemoryService:
         return f"<daily_memory date=\"{daily['local_date']}\" source_message_ids=\"{source_ids}\">\n{daily['summary'][:1800]}\n</daily_memory>"
 
     def generate_daily_memory(self, local_date: str) -> str:
+        if not self.feature_flags.enabled("memory.daily_curator"):
+            existing = self.repository.day(local_date)
+            return str(existing.get("summary") or "") if existing else ""
         messages = self.repository.messages_for_day(local_date)
         source_ids = [item.message_id for item in messages]
         narrative = []
@@ -88,6 +99,7 @@ class ConversationMemoryService:
         }
         self.daily_generator.validate(daily)
         self.repository.upsert_daily_memory(local_date, daily, source_ids, fingerprint)
+        self.repository.create_daily_version(local_date, daily, fingerprint)
         self.sync_daily_view(daily)
         return summary
 
@@ -130,6 +142,10 @@ class ConversationMemoryService:
     def is_tool_result(self, content: object) -> bool:
         items = content if isinstance(content, list) else []
         return any((isinstance(item, dict) and item.get("type") == "tool_result") or getattr(item, "type", "") == "tool_result" for item in items)
+
+    def has_tool_use(self, content: object) -> bool:
+        items = content if isinstance(content, list) else []
+        return any((isinstance(item, dict) and item.get("type") == "tool_use") or getattr(item, "type", "") == "tool_use" for item in items)
 
     def text(self, value: object) -> str:
         if isinstance(value, str):
